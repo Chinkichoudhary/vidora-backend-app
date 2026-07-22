@@ -4,8 +4,9 @@ from jose import JWTError, jwt
 import bcrypt
 from sqlalchemy.orm import Session
 from database import User
+import os
 
-SECRET_KEY = "vidora-secret-key-change-in-production-2026"
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "vidora-secret-key-change-in-production-2026")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 
