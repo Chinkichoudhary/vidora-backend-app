@@ -1,0 +1,6 @@
+.env
+venv/
+__pycache__/
+*.pyc
+vidora.db
+audio_output/
