@@ -665,9 +665,18 @@ def create_subscription_endpoint(
         raise HTTPException(status_code=400, detail="Invalid plan")
 
     if not current_user.razorpay_customer_id:
-        customer_id = get_or_create_customer(current_user.name, current_user.email)
-        current_user.razorpay_customer_id = customer_id
-        db.commit()
+        try:
+            customer_id = get_or_create_customer(
+            current_user.name,
+            current_user.email
+            )
+
+            current_user.razorpay_customer_id = customer_id
+            db.commit()
+
+        except Exception as e:
+            print("Customer creation failed:", e)
+            raise HTTPException(status_code=500, detail=str(e))
 
     subscription = create_subscription(request.plan, current_user.razorpay_customer_id)
 
