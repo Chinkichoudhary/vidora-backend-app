@@ -1,12 +1,10 @@
-FROM node:20-bookworm-slim
-
-# Base Python image
 FROM python:3.11-slim
 
-# Install Node.js, npm and required system libraries
+# Install Node.js, Chromium and required libraries
 RUN apt-get update && apt-get install -y \
     nodejs \
     npm \
+    chromium \
     ca-certificates \
     fonts-liberation \
     libasound2 \
@@ -29,22 +27,21 @@ RUN apt-get update && apt-get install -y \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
+# Tell Remotion where Chromium is installed
+ENV CHROME_BIN=/usr/bin/chromium
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+ENV REMOTION_BROWSER_EXECUTABLE=/usr/bin/chromium
+
 WORKDIR /app
 
-# Copy and install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy Remotion package files and install Node dependencies
 COPY remotion-project/package*.json ./remotion-project/
 RUN cd remotion-project && npm install
 
-# Copy the rest of the project
 COPY . .
 
-# Expose FastAPI port
 EXPOSE 8000
 
-# Start FastAPI
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn","main:app","--host","0.0.0.0","--port","8000"]

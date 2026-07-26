@@ -33,13 +33,20 @@ from razorpay_service import (
 import json as json_lib
 from datetime import datetime
 
+os.environ["CHROME_BIN"] = "/usr/bin/chromium"
+os.environ["PUPPETEER_EXECUTABLE_PATH"] = "/usr/bin/chromium"
+os.environ["REMOTION_BROWSER_EXECUTABLE"] = "/usr/bin/chromium"
+
 app = FastAPI()
 
 BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:8000")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "https://vidora-frontend-eaxq.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -478,22 +485,33 @@ async def pipeline(extracted_text: str, job_id: str):
         print(f"[{job_id}] Render timeout set to {render_timeout}s for a {duration_minutes_for_timeout}-minute video")
 
         try:
+            command = (
+                f'npx remotion render FullVideo "{output_path}" '
+                '--concurrency=100% '
+                '--image-format=jpeg'
+            )
+
+            print("Running:", command)
+
             render_result = subprocess.run(
-                'npx remotion render FullVideo "' + output_path + '" --concurrency=100% --image-format=jpeg',
+                command,
                 cwd=REMOTION_PROJECT_PATH,
                 capture_output=True,
                 text=True,
                 timeout=render_timeout,
                 shell=True,
             )
+
             print(f"[{job_id}] Render finished with code: {render_result.returncode}")
             print(f"[{job_id}] STDOUT tail: {render_result.stdout[-500:]}")
             print(f"[{job_id}] STDERR tail: {render_result.stderr[-500:]}")
+
         except subprocess.TimeoutExpired:
             print(f"[{job_id}] RENDER TIMED OUT")
             render_jobs[job_id]["status"] = "error"
             render_jobs[job_id]["error"] = f"Render timed out after {render_timeout // 60} minutes"
             return
+
         except Exception as render_err:
             print(f"[{job_id}] RENDER EXCEPTION: {str(render_err)}")
             render_jobs[job_id]["status"] = "error"
