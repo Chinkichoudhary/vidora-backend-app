@@ -108,11 +108,12 @@ def get_current_user(
     print("User ID:", user_id)
 
     if not user_id:
-        print("No user_id in token")
-
         return None
-    return get_user_by_id(db, int(user_id))
 
+    user = get_user_by_id(db, int(user_id))
+    print("Database user:", user)
+
+    return user
 
 @app.get("/")
 def root():
