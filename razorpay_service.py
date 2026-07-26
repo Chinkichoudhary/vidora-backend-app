@@ -23,17 +23,28 @@ PLAN_ID_MAP = {
 
 
 def get_or_create_customer(name: str, email: str) -> str:
-    """Creates a Razorpay customer and returns their customer_id."""
+    """Returns existing Razorpay customer or creates a new one."""
+
     try:
+        # Search existing customers
+        customers = client.customer.all({"count": 100})
+
+        for customer in customers["items"]:
+            if customer.get("email", "").lower() == email.lower():
+                print("Existing Razorpay customer:", customer["id"])
+                return customer["id"]
+
+        # Create new customer
         customer = client.customer.create({
             "name": name,
             "email": email,
-            "fail_existing": 0,  # returns existing customer if email already exists
         })
-        return customer["id"]
-    except Exception as e:
-        raise Exception(f"Failed to create Razorpay customer: {str(e)}")
 
+        print("Created Razorpay customer:", customer["id"])
+        return customer["id"]
+
+    except Exception as e:
+        raise Exception(f"Failed to create Razorpay customer: {e}")
 
 def create_subscription(plan_key: str, customer_id: str) -> dict:
     """
