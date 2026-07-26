@@ -92,14 +92,24 @@ def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db)
 ):
+    print("Authorization credentials:", credentials)
+
     if not credentials:
+        print("No Authorization header")
         return None
     token = credentials.credentials
+    print("Received token:", token)
+
     payload = decode_token(token)
     if not payload:
+        print("Token could not be decoded")
         return None
     user_id = payload.get("sub")
+    print("User ID:", user_id)
+
     if not user_id:
+        print("No user_id in token")
+
         return None
     return get_user_by_id(db, int(user_id))
 
