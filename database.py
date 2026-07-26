@@ -2,7 +2,7 @@ from sqlalchemy import create_engine, Column, Integer, String, DateTime, Foreign
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
-
+import os
 SQLALCHEMY_DATABASE_URL = "sqlite:///./vidora.db"
 
 engine = create_engine(

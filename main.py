@@ -92,6 +92,7 @@ def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db)
 ):
+    import os
     print("Authorization credentials:", credentials)
 
     if not credentials:
@@ -118,10 +119,14 @@ def get_current_user(
 
 
 
-
 @app.get("/debug/users")
 def debug_users(db: Session = Depends(get_db)):
+    import os
+
+    print("DB file:", os.path.abspath("vidora.db"))
+
     users = db.query(User).all()
+
     return [
         {
             "id": u.id,
@@ -134,7 +139,7 @@ def debug_users(db: Session = Depends(get_db)):
 
 
 
-    
+
 @app.get("/")
 def root():
     return {"message": "Vidora backend is running"}
