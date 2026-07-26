@@ -115,6 +115,26 @@ def get_current_user(
 
     return user
 
+
+
+
+
+@app.get("/debug/users")
+def debug_users(db: Session = Depends(get_db)):
+    users = db.query(User).all()
+    return [
+        {
+            "id": u.id,
+            "email": u.email,
+            "name": u.name
+        }
+        for u in users
+    ]
+
+
+
+
+    
 @app.get("/")
 def root():
     return {"message": "Vidora backend is running"}
