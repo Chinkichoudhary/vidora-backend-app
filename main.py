@@ -528,10 +528,10 @@ async def pipeline(extracted_text: str, job_id: str):
         try:
             command = (
                 f'npx remotion render FullVideo "{output_path}" '
-                '--concurrency=100% '
-                '--image-format=jpeg'
+                '--concurrency=1 '
+                '--image-format=jpeg '
+                '--log=verbose'
             )
-
             print("Running:", command)
 
             render_result = subprocess.run(
