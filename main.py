@@ -117,7 +117,11 @@ def get_current_user(
     if not user_id:
         return None
 
+    print("All users in DB:", db.query(User).all())
+
     user = get_user_by_id(db, int(user_id))
+
+    print("Database user:", user)
     print("Database user:", user)
 
     return user

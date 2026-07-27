@@ -7,6 +7,7 @@ from database import User
 import os
 
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "vidora-secret-key-change-in-production-2026")
+print("JWT SECRET =", SECRET_KEY)
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 
