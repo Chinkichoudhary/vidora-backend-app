@@ -9,6 +9,13 @@ import edge_tts
 import asyncio
 import os
 
+from groq import Groq
+from dotenv import load_dotenv
+
+load_dotenv()
+
+groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
 from plan_config import PLAN_HAS_AUDIO, SCENE_DURATIONS_NO_AUDIO, pick_voice, get_voices_for_language
 AUDIO_DIR = "audio_output"
 
@@ -29,18 +36,12 @@ def ensure_audio_dir():
         os.makedirs(AUDIO_DIR)
 
 
-def scene_to_narration(scene: dict, language: str = "english") -> str:
+async def scene_to_narration(scene: dict, language: str = "english") -> str:
     """
     Calls Groq to generate a rich teacher-style explanation for each scene,
     written entirely in the given language.
     """
-    import os
-    from groq import Groq
-    from dotenv import load_dotenv
-    load_dotenv()
-
-    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-
+   
     scene_type = scene.get("type", "")
     target_language = LANGUAGE_NAMES.get(language, "English")
 
@@ -149,30 +150,45 @@ def scene_to_narration(scene: dict, language: str = "english") -> str:
     else:
         return ""
 
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are an expert educational video narrator who sounds like an enthusiastic, "
-                    "friendly teacher. You explain things clearly with real-life examples and analogies. "
-                    "You never just read what's on screen — you always add more context and explanation. "
-                    "Keep your narration natural, conversational, and engaging. "
-                    "Do NOT use bullet points, headers, or formatting. "
-                    f"Write your ENTIRE response in {target_language} only, as if you are talking "
-                    f"to a student who speaks {target_language} natively. Do not mix in English "
-                    f"unless a term has no natural {target_language} equivalent."
-                ),
-            },
-            {"role": "user", "content": instruction},
-        ],
-        temperature=0.7,
-        max_tokens=300,
-    )
+    print(f"Calling Groq for scene {scene.get('type')}")
+
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: groq_client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are an expert educational video narrator who sounds like an enthusiastic, "
+                                "friendly teacher. You explain things clearly with real-life examples and analogies. "
+                                "You never just read what's on screen — you always add more context and explanation. "
+                                "Keep your narration natural, conversational, and engaging. "
+                                "Do NOT use bullet points, headers, or formatting. "
+                                f"Write your ENTIRE response in {target_language} only, as if you are talking "
+                                f"to a student who speaks {target_language} natively. "
+                                f"Do not mix in English unless a term has no natural {target_language} equivalent."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": instruction,
+                       },
+                   ],
+                   temperature=0.7,
+                   max_tokens=300,
+                )
+           ),
+           timeout=60,
+        )
+
+        print(f"Groq finished for scene {scene.get('type')}")
+
+    except asyncio.TimeoutError:
+        raise Exception("Groq request timed out after 60 seconds")
 
     return response.choices[0].message.content.strip()
-
 
 async def generate_audio_for_scene(
     scene: dict,
@@ -182,8 +198,9 @@ async def generate_audio_for_scene(
     language: str,
 ) -> dict:
     ensure_audio_dir()
-
-    narration = scene_to_narration(scene, language)
+    print(f"Generating narration for scene {scene_index}")
+    narration =  await scene_to_narration(scene, language)
+    print(f"Narration generated for scene {scene_index}")
     if not narration.strip():
         return {
             "scene_index": scene_index,
@@ -198,7 +215,15 @@ async def generate_audio_for_scene(
     audio_path = os.path.join(AUDIO_DIR, audio_filename)
 
     communicate = edge_tts.Communicate(narration, voice)
-    await communicate.save(audio_path)
+    print(f"Generating TTS for scene {scene_index}")
+    try:
+        await asyncio.wait_for(
+            communicate.save(audio_path),
+            timeout=60
+        )
+    except asyncio.TimeoutError:
+        raise Exception("Edge TTS timed out")
+    print(f"TTS finished for scene {scene_index}")
 
     duration = await get_audio_duration(audio_path)
 
@@ -253,12 +278,22 @@ async def generate_all_audio(
 
     resolved_voice = voice or pick_voice(plan, language)
 
-    tasks = [
-        generate_audio_for_scene(scene, index, video_id, resolved_voice, language)
-        for index, scene in enumerate(scenes)
-    ]
-    results = await asyncio.gather(*tasks)
-    return list(results)
+    results = []
+
+    for index, scene in enumerate(scenes):
+        print(f"Generating audio for scene {index + 1}/{len(scenes)}")
+
+        result = await generate_audio_for_scene(
+            scene,
+            index,
+            video_id,
+            resolved_voice,
+            language,
+        )
+
+        results.append(result)
+
+    return results
 
 
 def generate_audio_sync(scenes: list, video_id: str, plan: str = "premium", language: str = "english", voice: str = None) -> list:
