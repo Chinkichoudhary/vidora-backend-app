@@ -63,6 +63,13 @@ render_jobs: dict = {}
 
 create_tables()
 
+# --- temporary debug: prints all users to the server log on startup ---
+_debug_db = SessionLocal()
+print("========== USERS ==========")
+print(_debug_db.query(User).all())
+print("===========================")
+_debug_db.close()
+
 security = HTTPBearer(auto_error=False)
 
 
@@ -92,7 +99,6 @@ def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db)
 ):
-    import os
     print("Authorization credentials:", credentials)
 
     if not credentials:
@@ -117,12 +123,10 @@ def get_current_user(
     return user
 
 
-
-
+# NOTE: exposes user id/email/name with no auth check — remove or protect
+# this before going live with real users.
 @app.get("/debug/users")
 def debug_users(db: Session = Depends(get_db)):
-    import os
-
     print("DB file:", os.path.abspath("vidora.db"))
 
     users = db.query(User).all()
@@ -135,9 +139,6 @@ def debug_users(db: Session = Depends(get_db)):
         }
         for u in users
     ]
-
-
-
 
 
 @app.get("/")
@@ -667,16 +668,17 @@ def create_subscription_endpoint(
     if not current_user.razorpay_customer_id:
         try:
             customer_id = get_or_create_customer(
-            current_user.name,
-            current_user.email
+                current_user.name,
+                current_user.email,
             )
-
             current_user.razorpay_customer_id = customer_id
             db.commit()
-
         except Exception as e:
-            print("Customer creation failed:", e)
-            raise HTTPException(status_code=500, detail=str(e))
+            print("RAZORPAY ERROR:", str(e))
+            raise HTTPException(
+                status_code=500,
+                detail=str(e)
+            )
 
     subscription = create_subscription(request.plan, current_user.razorpay_customer_id)
 
