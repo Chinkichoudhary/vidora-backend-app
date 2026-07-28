@@ -526,13 +526,16 @@ async def pipeline(extracted_text: str, job_id: str):
         print(f"[{job_id}] Render timeout set to {render_timeout}s for a {duration_minutes_for_timeout}-minute video")
 
         try:
+            print(f"[{job_id}] About to start Remotion")
+
             command = (
                 f'npx remotion render FullVideo "{output_path}" '
                 '--concurrency=1 '
                 '--image-format=jpeg '
                 '--log=verbose'
             )
-            print("Running:", command)
+
+            print(f"[{job_id}] Command: {command}")
 
             render_result = subprocess.run(
                 command,
@@ -543,9 +546,15 @@ async def pipeline(extracted_text: str, job_id: str):
                 shell=True,
             )
 
-            print(f"[{job_id}] Render finished with code: {render_result.returncode}")
-            print(f"[{job_id}] STDOUT tail: {render_result.stdout[-500:]}")
-            print(f"[{job_id}] STDERR tail: {render_result.stderr[-500:]}")
+            print(f"[{job_id}] subprocess.run() returned")
+
+            print("========== STDOUT ==========")
+            print(render_result.stdout)
+
+            print("========== STDERR ==========")
+            print(render_result.stderr)
+
+            print(f"[{job_id}] Return code = {render_result.returncode}")
 
         except subprocess.TimeoutExpired:
             print(f"[{job_id}] RENDER TIMED OUT")
