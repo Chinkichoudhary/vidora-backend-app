@@ -529,11 +529,15 @@ async def pipeline(extracted_text: str, job_id: str):
             print(f"[{job_id}] About to start Remotion")
 
             command = (
-                f'npx remotion render FullVideo "{output_path}" '
-                '--concurrency=1 '
-                '--image-format=jpeg '
-                '--log=verbose'
-            )
+    f'npx remotion render FullVideo "{output_path}" '
+    '--browser-executable=/usr/bin/chromium '
+    '--disable-web-security '
+    '--disable-gpu '
+    '--disable-dev-shm-usage '
+    '--concurrency=1 '
+    '--image-format=jpeg '
+    '--log=verbose'
+)
 
             print(f"[{job_id}] Command: {command}")
 
