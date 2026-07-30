@@ -528,19 +528,23 @@ async def pipeline(extracted_text: str, job_id: str):
         try:
             print(f"[{job_id}] About to start Remotion")
 
-            command = (
-    f'npx remotion render FullVideo "{output_path}" '
-    '--chromium-flag=--no-sandbox '
-    '--chromium-flag=--disable-setuid-sandbox '
-    '--chromium-flag=--disable-dev-shm-usage '
-    '--chromium-flag=--disable-gpu '
-    '--chromium-flag=--disable-software-rasterizer '
-    '--chromium-flag=--disable-features=VizDisplayCompositor '
-    '--chromium-flag=--use-gl=swiftshader '
-    '--concurrency=1 '
-    '--image-format=jpeg '
-    '--log=verbose'
-)
+            command = [
+    "npx",
+    "remotion",
+    "render",
+    "FullVideo",
+    output_path,
+    "--concurrency=1",
+    "--image-format=jpeg",
+    "--log=verbose",
+    "--chromium-flag=--no-sandbox",
+    "--chromium-flag=--disable-setuid-sandbox",
+    "--chromium-flag=--disable-dev-shm-usage",
+    "--chromium-flag=--disable-gpu",
+    "--chromium-flag=--disable-software-rasterizer",
+    "--chromium-flag=--disable-features=VizDisplayCompositor",
+    "--chromium-flag=--use-gl=swiftshader",
+]
             
 
             env = os.environ.copy()
@@ -558,6 +562,7 @@ async def pipeline(extracted_text: str, job_id: str):
                 capture_output=True,
                 text=True,
                 timeout=render_timeout,
+                #shell = True,
             )
           
 
