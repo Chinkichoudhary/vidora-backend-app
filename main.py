@@ -443,7 +443,8 @@ async def pipeline(extracted_text: str, job_id: str):
         plan = render_jobs[job_id].get("plan", "premium")
         language = render_jobs[job_id].get("language", "english")
         voice = render_jobs[job_id].get("voice")
-        duration_minutes = render_jobs[job_id].get("duration_minutes", 3)
+        #duration_minutes = render_jobs[job_id].get("duration_minutes", 3)
+        duration_minutes = 0.1
         has_audio = PLAN_HAS_AUDIO.get(plan, True)
         target_scene_count = estimate_scene_count(duration_minutes, has_audio)
 
