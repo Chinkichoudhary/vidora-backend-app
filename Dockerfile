@@ -1,12 +1,14 @@
 FROM python:3.11-slim
 
-# -----------------------------
-# Install Node.js, Chromium and dependencies
-# -----------------------------
+# Install Chromium + dependencies
 RUN apt-get update && apt-get install -y \
+    chromium \
+    chromium-common \
+    chromium-sandbox \
+    xvfb \
     nodejs \
     npm \
-    chromium \
+    wget \
     ca-certificates \
     fonts-liberation \
     libasound2 \
@@ -28,53 +30,34 @@ RUN apt-get update && apt-get install -y \
     libxkbcommon0 \
     libxss1 \
     libxtst6 \
+    libglib2.0-0 \
+    libxrender1 \
+    libxcb1 \
     xdg-utils \
-    wget \
-    curl \
-    unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# -----------------------------
-# Verify Chromium installation
-# -----------------------------
-RUN which chromium || which chromium-browser
-
-# Give execute permission
-RUN chmod +x /usr/bin/chromium || true
-RUN chmod +x /usr/bin/chromium-browser || true
-
-# -----------------------------
-# Tell Remotion to use system Chromium
-# -----------------------------
+# Browser environment
+ENV DISPLAY=:99
 ENV CHROME_BIN=/usr/bin/chromium
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV REMOTION_BROWSER_EXECUTABLE=/usr/bin/chromium
 
-# Prevent Puppeteer from downloading Chrome
-ENV PUPPETEER_SKIP_DOWNLOAD=true
-
-# Helpful in Docker
-ENV DISPLAY=:99
-
-# -----------------------------
-# App
-# -----------------------------
 WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# -----------------------------
-# Install Remotion dependencies
-# -----------------------------
 COPY remotion-project/package*.json ./remotion-project/
-RUN cd remotion-project && npm install
 
-# -----------------------------
-# Copy project
-# -----------------------------
+WORKDIR /app/remotion-project
+
+# Install Remotion dependencies
+RUN npm install
+
+WORKDIR /app
+
 COPY . .
 
 EXPOSE 8000
 
-CMD ["uvicorn","main:app","--host","0.0.0.0","--port","8000"]
+CMD sh -c "Xvfb :99 -screen 0 1920x1080x24 & uvicorn main:app --host 0.0.0.0 --port 8000"
