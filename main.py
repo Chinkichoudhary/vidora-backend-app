@@ -553,26 +553,32 @@ async def pipeline(extracted_text: str, job_id: str):
             
 
             env = os.environ.copy()
-            #env["CHROME_BIN"] = "/usr/bin/chromium"
-            #env["PUPPETEER_EXECUTABLE_PATH"] = "/usr/bin/chromium"
-            #env["REMOTION_BROWSER_EXECUTABLE"] = "/usr/bin/chromium"
+            env["CHROME_BIN"] = "/usr/bin/chromium"
+            env["PUPPETEER_EXECUTABLE_PATH"] = "/usr/bin/chromium"
+            env["REMOTION_BROWSER_EXECUTABLE"] = "/usr/bin/chromium"
 
-            print("========== COMMAND ==========") 
-            print(" ".join(command))
-            import subprocess
+            print("========== COMMAND ==========")
+            print(command)
 
             print("========== MEMORY ==========")
             subprocess.run("free -h", shell=True)
 
             print("========== DISK ==========")
             subprocess.run("df -h", shell=True)
+
+            print("========== CHROMIUM ==========")
+            subprocess.run("which chromium", shell=True)
             subprocess.run("chromium --version", shell=True)
 
+            print("========== TEST CHROMIUM ==========")
             subprocess.run(
-              "chromium --headless --no-sandbox --disable-gpu --dump-dom https://example.com",
-               shell=True,
+                "chromium --headless --no-sandbox --disable-gpu --dump-dom https://example.com",
+                shell=True,
             )
-            render_result = subprocess.Popen(
+
+            print("========== STARTING REMOTION ==========")
+
+            process = subprocess.Popen(
                 command,
                 cwd=REMOTION_PROJECT_PATH,
                 env=env,
@@ -580,25 +586,27 @@ async def pipeline(extracted_text: str, job_id: str):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                bufsize=1,
             )
 
-            for line in render_result.stdout:
-                print(line, end="")
+            print("REMOTION PID =", process.pid)
 
-            return_code = render_result.wait()
+            while True:
+                line = process.stdout.readline()
 
-            print("RETURN CODE =", return_code)
-          
+                if line:
+                    print("[REMOTION]", line.rstrip())
 
-            print(f"[{job_id}] subprocess.run() returned")
+                if process.poll() is not None:
+                    break
 
-            print("========== STDOUT ==========")
-            print(render_result.stdout)
+            print("========== REMOTION FINISHED ==========")
+            print("RETURN CODE =", process.returncode)
 
-            print("========== STDERR ==========")
-            print(render_result.stderr)
-
-            print(f"[{job_id}] Return code = {render_result.returncode}")
+            if process.returncode != 0:
+                render_jobs[job_id]["status"] = "error"
+                render_jobs[job_id]["error"] = f"Remotion failed with exit code {process.returncode}"
+                return
 
         except subprocess.TimeoutExpired:
             print(f"[{job_id}] RENDER TIMED OUT")
@@ -612,9 +620,9 @@ async def pipeline(extracted_text: str, job_id: str):
             render_jobs[job_id]["error"] = "Render subprocess failed: " + str(render_err)
             return
 
-        if render_result.returncode != 0:
+        if process.returncode != 0:
             render_jobs[job_id]["status"] = "error"
-            render_jobs[job_id]["error"] = render_result.stderr[-1000:]
+            render_jobs[job_id]["error"] = process.stderr[-1000:]
             return
 
         if not os.path.exists(output_path):
