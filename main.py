@@ -538,6 +538,7 @@ async def pipeline(extracted_text: str, job_id: str):
     "render",
     "FullVideo",
     output_path,
+    '--browser-executable=/usr/bin/chromium ',
     "--concurrency=1",
     "--image-format=jpeg",
     "--log=verbose",
@@ -565,15 +566,28 @@ async def pipeline(extracted_text: str, job_id: str):
 
             print("========== DISK ==========")
             subprocess.run("df -h", shell=True)
-            render_result = subprocess.run(
+            subprocess.run("chromium --version", shell=True)
+
+            subprocess.run(
+              "chromium --headless --no-sandbox --disable-gpu --dump-dom https://example.com",
+               shell=True,
+            )
+            render_result = subprocess.Popen(
                 command,
                 cwd=REMOTION_PROJECT_PATH,
                 env=env,
-                capture_output=True,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
-                timeout=render_timeout,
-                #shell = True,
             )
+
+            for line in render_result.stdout:
+                print(line, end="")
+
+            return_code = render_result.wait()
+
+            print("RETURN CODE =", return_code)
           
 
             print(f"[{job_id}] subprocess.run() returned")

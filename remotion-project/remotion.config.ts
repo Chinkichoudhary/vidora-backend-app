@@ -6,6 +6,6 @@ Config.setOverwriteOutput(true);
 Config.overrideWebpackConfig(enableTailwind);
 
 // ADD THESE
-//Config.setBrowserExecutable("/usr/bin/chromium");
+Config.setBrowserExecutable("/usr/bin/chromium");
 Config.setChromiumDisableWebSecurity(true);
 Config.setDelayRenderTimeoutInMilliseconds(120000);
