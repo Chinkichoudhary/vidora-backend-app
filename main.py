@@ -97,35 +97,38 @@ class VerifySubscriptionRequest(BaseModel):
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-    print("Authorization credentials:", credentials)
+    print("========== AUTH ==========")
 
-    if not credentials:
-        print("No Authorization header")
+    if credentials is None:
+        print("No credentials")
         return None
+
     token = credentials.credentials
-    print("Received token:", token)
+    print("Token:", token)
 
     payload = decode_token(token)
-    if not payload:
-        print("Token could not be decoded")
+
+    print("Decoded payload:", payload)
+
+    if payload is None:
+        print("decode_token() returned None")
         return None
+
     user_id = payload.get("sub")
+
     print("User ID:", user_id)
 
-    if not user_id:
+    if user_id is None:
+        print("No sub in token")
         return None
 
-    print("All users in DB:", db.query(User).all())
+    user = db.query(User).filter(User.id == int(user_id)).first()
 
-    user = get_user_by_id(db, int(user_id))
-
-    print("Database user:", user)
     print("Database user:", user)
 
     return user
-
 
 # NOTE: exposes user id/email/name with no auth check — remove or protect
 # this before going live with real users.
@@ -554,7 +557,13 @@ async def pipeline(extracted_text: str, job_id: str):
 
             print("========== COMMAND ==========") 
             print(" ".join(command))
+            import subprocess
 
+            print("========== MEMORY ==========")
+            subprocess.run("free -h", shell=True)
+
+            print("========== DISK ==========")
+            subprocess.run("df -h", shell=True)
             render_result = subprocess.run(
                 command,
                 cwd=REMOTION_PROJECT_PATH,

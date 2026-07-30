@@ -36,11 +36,24 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     return encoded_jwt
 
 
+from jose import JWTError
+
 def decode_token(token: str) -> Optional[dict]:
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(
+            token,
+            SECRET_KEY,
+            algorithms=[ALGORITHM],
+        )
+        print("Decoded JWT:", payload)
         return payload
-    except JWTError:
+
+    except JWTError as e:
+        print("JWT decode failed:", str(e))
+        return None
+
+    except Exception as e:
+        print("Unexpected JWT error:", str(e))
         return None
 
 
