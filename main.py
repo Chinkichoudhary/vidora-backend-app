@@ -530,8 +530,6 @@ async def pipeline(extracted_text: str, job_id: str):
 
             command = (
     f'npx remotion render FullVideo "{output_path}" '
-    '--browser-executable=/usr/bin/chromium '
-    '--chrome-mode=chrome-for-testing '
     '--chromium-flag=--no-sandbox '
     '--chromium-flag=--disable-setuid-sandbox '
     '--chromium-flag=--disable-dev-shm-usage '
@@ -543,41 +541,12 @@ async def pipeline(extracted_text: str, job_id: str):
     '--image-format=jpeg '
     '--log=verbose'
 )
-            print(f"[{job_id}] About to start Remotion")
-
-            command = [
-                "npx",
-                "remotion",
-                "render",
-                "src/index.ts",
-                "FullVideo",
-                output_path,
-
-                "--browser-executable=/usr/bin/chromium",
-
-                "--chromium-flag=--no-sandbox",
-                "--chromium-flag=--disable-setuid-sandbox",
-                "--chromium-flag=--disable-dev-shm-usage",
-                "--chromium-flag=--disable-gpu",
-                "--chromium-flag=--disable-software-rasterizer",
-                "--chromium-flag=--disable-background-networking",
-                "--chromium-flag=--disable-sync",
-                "--chromium-flag=--disable-extensions",    
-                "--chromium-flag=--disable-default-apps",
-                "--chromium-flag=--disable-features=VizDisplayCompositor",
-                "--chromium-flag=--single-process",
-                "--chromium-flag=--no-zygote",
-                "--chromium-flag=--headless=new",
-
-                "--concurrency=1",
-                "--image-format=jpeg",
-                "--log=verbose",
-            ]
+            
 
             env = os.environ.copy()
-            env["CHROME_BIN"] = "/usr/bin/chromium"
-            env["PUPPETEER_EXECUTABLE_PATH"] = "/usr/bin/chromium"
-            env["REMOTION_BROWSER_EXECUTABLE"] = "/usr/bin/chromium"
+            #env["CHROME_BIN"] = "/usr/bin/chromium"
+            #env["PUPPETEER_EXECUTABLE_PATH"] = "/usr/bin/chromium"
+            #env["REMOTION_BROWSER_EXECUTABLE"] = "/usr/bin/chromium"
 
             print("========== COMMAND ==========") 
             print(" ".join(command))
