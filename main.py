@@ -538,7 +538,7 @@ async def pipeline(extracted_text: str, job_id: str):
     "render",
     "FullVideo",
     output_path,
-    '--browser-executable=/usr/bin/chromium ',
+    "--browser-executable=/usr/bin/chromium",
     "--concurrency=1",
     "--image-format=jpeg",
     "--log=verbose",
@@ -546,8 +546,6 @@ async def pipeline(extracted_text: str, job_id: str):
     "--chromium-flag=--disable-setuid-sandbox",
     "--chromium-flag=--disable-dev-shm-usage",
     "--chromium-flag=--disable-gpu",
-    "--chromium-flag=--disable-software-rasterizer",
-    "--chromium-flag=--disable-features=VizDisplayCompositor",
     "--chromium-flag=--use-gl=swiftshader",
 ]
             
