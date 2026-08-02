@@ -32,7 +32,15 @@ from razorpay_service import (
 )
 import json as json_lib
 from datetime import datetime
+import logging
+import sys
 
+logging.basicConfig(
+    level=logging.INFO,
+    stream=sys.stdout,
+    force=True,
+)
+logger = logging.getLogger("vidora")
 os.environ["CHROME_BIN"] = "/usr/bin/chromium"
 os.environ["PUPPETEER_EXECUTABLE_PATH"] = "/usr/bin/chromium"
 os.environ["REMOTION_BROWSER_EXECUTABLE"] = "/usr/bin/chromium"
@@ -500,135 +508,115 @@ async def pipeline(extracted_text: str, job_id: str):
 
         print(f"[{job_id}] sampleScenes.ts updated")
 
-        root_path = os.path.join(REMOTION_PROJECT_PATH, "src", "Root.tsx")
-        with open(root_path, "r", encoding="utf-8") as f:
-            root_content = f.read()
-        root_content = re.sub(
-            r'(id="FullVideo"[^<]*?)durationInFrames=\{\d+\}',
-            r'\1durationInFrames={' + str(total_frames) + r'}',
-            root_content,
-            flags=re.DOTALL
-        )
-        with open(root_path, "w", encoding="utf-8") as f:
-            f.write(root_content)
+        
 
         print(f"[{job_id}] Root.tsx updated")
         print(f"[{job_id}] Step: Rendering video")
         render_jobs[job_id]["step"] = "Rendering video"
 
-        output_filename = video_id + "_video.mp4"
-        output_path = os.path.join(REMOTION_PROJECT_PATH, "out", output_filename)
-        os.makedirs(os.path.join(REMOTION_PROJECT_PATH, "out"), exist_ok=True)
+        out_dir = os.path.join(REMOTION_PROJECT_PATH, "out")
+        os.makedirs(out_dir, exist_ok=True)
 
-        time.sleep(3)
+        output_filename = f"{video_id}_video.mp4"
+        output_file = os.path.join(out_dir, output_filename)
 
-        print(f"[{job_id}] Starting Remotion render subprocess...")
-        print(f"[{job_id}] Output path: {output_path}")
+        if os.path.exists(output_file):
+            os.remove(output_file)
 
-        duration_minutes_for_timeout = render_jobs[job_id].get("duration_minutes", 3)
-        render_timeout = max(1800, int(duration_minutes_for_timeout) * 300)
-        print(f"[{job_id}] Render timeout set to {render_timeout}s for a {duration_minutes_for_timeout}-minute video")
+        print(f"[{job_id}] Output file: {output_file}")
 
-        try:
-            print(f"[{job_id}] About to start Remotion")
+        time.sleep(1)
 
-            command = [
+        command = [
     "npx",
     "remotion",
     "render",
+    "src/index.ts",
     "FullVideo",
-    output_path,
-    "--browser-executable=/usr/bin/chromium",
+    output_file,
+    "--overwrite",
+    "--log=verbose",
     "--concurrency=1",
     "--image-format=jpeg",
-    "--log=verbose",
     "--chromium-flag=--no-sandbox",
     "--chromium-flag=--disable-setuid-sandbox",
     "--chromium-flag=--disable-dev-shm-usage",
     "--chromium-flag=--disable-gpu",
     "--chromium-flag=--use-gl=swiftshader",
 ]
-            
 
-            env = os.environ.copy()
-            env["CHROME_BIN"] = "/usr/bin/chromium"
-            env["PUPPETEER_EXECUTABLE_PATH"] = "/usr/bin/chromium"
-            env["REMOTION_BROWSER_EXECUTABLE"] = "/usr/bin/chromium"
+        env = os.environ.copy()
 
-            print("========== COMMAND ==========")
-            print(command)
+        if os.name != "nt":
+            env["CHROME_BIN"]="/usr/bin/chromium"
+            env["PUPPETEER_EXECUTABLE_PATH"]="/usr/bin/chromium"
 
-            print("========== MEMORY ==========")
-            subprocess.run("free -h", shell=True)
+            command += [
+        "--browser-executable=/usr/bin/chromium",
+        "--chromium-flag=--no-sandbox",
+        "--chromium-flag=--disable-setuid-sandbox",
+        "--chromium-flag=--disable-dev-shm-usage",
+        "--chromium-flag=--disable-gpu",
+        "--chromium-flag=--use-gl=swiftshader",
+            ]
+        else:
+            env.pop("CHROME_BIN", None)
+            env.pop("PUPPETEER_EXECUTABLE_PATH", None)
+            env.pop("REMOTION_BROWSER_EXECUTABLE", None)
 
-            print("========== DISK ==========")
-            subprocess.run("df -h", shell=True)
+        print("========== COMMAND ==========")
+        print(" ".join(command))
+        print("Working directory:", REMOTION_PROJECT_PATH)
+        result = subprocess.run(
+            command,
+            cwd=REMOTION_PROJECT_PATH,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
 
-            print("========== CHROMIUM ==========")
-            subprocess.run("which chromium", shell=True)
-            subprocess.run("chromium --version", shell=True)
+        print("========== STDOUT ==========")
+        print(result.stdout)
 
-            print("========== TEST CHROMIUM ==========")
-            subprocess.run(
-                "chromium --headless --no-sandbox --disable-gpu --dump-dom https://example.com",
-                shell=True,
-            )
+        print("========== STDERR ==========")
+        print(result.stderr)
 
-            print("========== STARTING REMOTION ==========")
+        print("========== RETURN CODE ==========")
+        print(result.returncode)
 
-            process = subprocess.Popen(
-                command,
-                cwd=REMOTION_PROJECT_PATH,
-                env=env,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
-
-            print("REMOTION PID =", process.pid)
-
-            while True:
-                line = process.stdout.readline()
-
-                if line:
-                    print("[REMOTION]", line.rstrip())
-
-                if process.poll() is not None:
-                    break
-
-            print("========== REMOTION FINISHED ==========")
-            print("RETURN CODE =", process.returncode)
-
-            if process.returncode != 0:
-                render_jobs[job_id]["status"] = "error"
-                render_jobs[job_id]["error"] = f"Remotion failed with exit code {process.returncode}"
-                return
-
-        except subprocess.TimeoutExpired:
-            print(f"[{job_id}] RENDER TIMED OUT")
+        if result.returncode != 0:
             render_jobs[job_id]["status"] = "error"
-            render_jobs[job_id]["error"] = f"Render timed out after {render_timeout // 60} minutes"
+            render_jobs[job_id]["error"] = result.stderr
             return
 
-        except Exception as render_err:
-            print(f"[{job_id}] RENDER EXCEPTION: {str(render_err)}")
+        print("========== OUT DIRECTORY ==========")
+
+        for root, dirs, files in os.walk(out_dir):
+            print(root)
+            for f in files:
+                print("FILE:", f)
+
+        print("Searching for rendered mp4...")
+
+        mp4_files = []
+
+        for root, dirs, files in os.walk(REMOTION_PROJECT_PATH):
+            for f in files:
+                if f.endswith(".mp4"):
+                    full = os.path.join(root, f)
+                    print(full)
+                    mp4_files.append(full)
+
+        if len(mp4_files) == 0:
+
             render_jobs[job_id]["status"] = "error"
-            render_jobs[job_id]["error"] = "Render subprocess failed: " + str(render_err)
+            render_jobs[job_id]["error"] = "No MP4 produced."
             return
 
-        if process.returncode != 0:
-            render_jobs[job_id]["status"] = "error"
-            render_jobs[job_id]["error"] = process.stderr[-1000:]
-            return
+        output_file = max(mp4_files, key=os.path.getmtime)
 
-        if not os.path.exists(output_path):
-            print(f"[{job_id}] ERROR: Output file does not exist after render")
-            render_jobs[job_id]["status"] = "error"
-            render_jobs[job_id]["error"] = "Render completed but output file was not created."
-            return
-
+        print("Using:", output_file)
+        output_path = output_file
         serve_path = os.path.join("audio_output", output_filename)
         shutil.copy(output_path, serve_path)
 
