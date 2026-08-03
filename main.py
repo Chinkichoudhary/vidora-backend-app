@@ -33,14 +33,18 @@ from razorpay_service import (
 import json as json_lib
 from datetime import datetime
 import logging
-import sys
+import os
+
+LOG_FILE = "/tmp/pipeline.log"
 
 logging.basicConfig(
+    filename=LOG_FILE,
     level=logging.INFO,
-    stream=sys.stdout,
+    format="%(asctime)s %(message)s",
     force=True,
 )
-logger = logging.getLogger("vidora")
+
+logger = logging.getLogger(__name__)
 os.environ["CHROME_BIN"] = "/usr/bin/chromium"
 os.environ["PUPPETEER_EXECUTABLE_PATH"] = "/usr/bin/chromium"
 os.environ["REMOTION_BROWSER_EXECUTABLE"] = "/usr/bin/chromium"
@@ -155,6 +159,10 @@ def debug_users(db: Session = Depends(get_db)):
         for u in users
     ]
 
+@app.get("/test123")
+async def test123():
+    print("TEST123 ENDPOINT HIT", flush=True)
+    return {"message": "backend is updated"}
 
 @app.get("/")
 def root():
@@ -420,11 +428,26 @@ async def start_render(
     }
 
     def run_pipeline(text: str, jid: str):
+        print("THREAD STARTED", flush=True)
+
         import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(pipeline(text, jid))
-        loop.close()
+
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            print("RUNNING PIPELINE", flush=True)
+
+            loop.run_until_complete(pipeline(text, jid))
+
+            print("PIPELINE FINISHED", flush=True)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+
+        finally:
+            loop.close()
 
     thread = threading.Thread(
         target=run_pipeline,
@@ -444,7 +467,7 @@ async def start_render(
 
 async def pipeline(extracted_text: str, job_id: str):
     try:
-        print(f"[{job_id}] Step: Writing script with AI")
+        print(f"[{job_id}] Step: Writing script with AI", flush=True)
         render_jobs[job_id]["step"] = "Writing script with AI"
         render_jobs[job_id]["status"] = "processing"
 
@@ -511,7 +534,7 @@ async def pipeline(extracted_text: str, job_id: str):
         
 
         print(f"[{job_id}] Root.tsx updated")
-        print(f"[{job_id}] Step: Rendering video")
+        logger.info(f"[{job_id}] Step: Rendering video")
         render_jobs[job_id]["step"] = "Rendering video"
 
         out_dir = os.path.join(REMOTION_PROJECT_PATH, "out")
@@ -585,9 +608,9 @@ async def pipeline(extracted_text: str, job_id: str):
         print(result.returncode)
 
         if result.returncode != 0:
-            render_jobs[job_id]["status"] = "error"
-            render_jobs[job_id]["error"] = result.stderr
-            return
+            print(result.stdout)
+            print(result.stderr)
+            raise Exception("Remotion render failed")
 
         print("========== OUT DIRECTORY ==========")
 
