@@ -590,6 +590,7 @@ async def pipeline(extracted_text: str, job_id: str):
         print("========== COMMAND ==========")
         print(" ".join(command))
         print("Working directory:", REMOTION_PROJECT_PATH)
+        print("ABOUT TO RUN REMOTION", flush=True)
         result = subprocess.run(
             command,
             cwd=REMOTION_PROJECT_PATH,
@@ -597,16 +598,27 @@ async def pipeline(extracted_text: str, job_id: str):
             capture_output=True,
             text=True,
         )
+        print("Listing output directory")
 
-        print("========== STDOUT ==========")
-        print(result.stdout)
+        for root, dirs, files in os.walk(REMOTION_PROJECT_PATH):
+            for f in files:
+                if f.endswith(".mp4"):
+                    print("FOUND:", os.path.join(root, f))
+        print("REMOTION FINISHED", flush=True)
+        with open("/tmp/remotion_stdout.txt", "w") as f:
+            f.write(result.stdout) 
 
-        print("========== STDERR ==========")
-        print(result.stderr)
+        with open("/tmp/remotion_stderr.txt", "w") as f:
+            f.write(result.stderr)
+
+        print("stdout length =", len(result.stdout))
+        print("stderr length =", len(result.stderr))
 
         print("========== RETURN CODE ==========")
         print(result.returncode)
-
+        print("OUTPUT EXISTS:", os.path.exists(output_file))
+        print("EXPECTED OUTPUT:", output_file)
+        print("DIRECTORY CONTENTS:", os.listdir(out_dir))
         if result.returncode != 0:
             print(result.stdout)
             print(result.stderr)
