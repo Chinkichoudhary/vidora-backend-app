@@ -560,14 +560,7 @@ async def pipeline(extracted_text: str, job_id: str):
     "--overwrite",
     "--log=verbose",
     "--concurrency=1",
-    "--image-format=jpeg",
-    "--chromium-flag=--no-sandbox",
-    "--chromium-flag=--disable-setuid-sandbox",
-    "--chromium-flag=--disable-dev-shm-usage",
-    "--chromium-flag=--disable-gpu",
-    "--chromium-flag=--use-gl=swiftshader",
 ]
-
         env = os.environ.copy()
 
         if os.name != "nt":
@@ -587,10 +580,17 @@ async def pipeline(extracted_text: str, job_id: str):
             env.pop("PUPPETEER_EXECUTABLE_PATH", None)
             env.pop("REMOTION_BROWSER_EXECUTABLE", None)
 
+        print("========== ENVIRONMENT ==========")
+        print("PATH =", env.get("PATH"))
+        print("NODE =", shutil.which("node"))
+        print("NPX =", shutil.which("npx"))
+        print("CHROMIUM =", shutil.which("chromium"))
+
         print("========== COMMAND ==========")
         print(" ".join(command))
         print("Working directory:", REMOTION_PROJECT_PATH)
         print("ABOUT TO RUN REMOTION", flush=True)
+    
         result = subprocess.run(
             command,
             cwd=REMOTION_PROJECT_PATH,
@@ -598,6 +598,7 @@ async def pipeline(extracted_text: str, job_id: str):
             capture_output=True,
             text=True,
         )
+
         print("Listing output directory")
 
         for root, dirs, files in os.walk(REMOTION_PROJECT_PATH):
