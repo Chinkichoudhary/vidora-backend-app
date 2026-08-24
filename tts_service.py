@@ -14,8 +14,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
+if not GROQ_API_KEY:
+    raise RuntimeError("GROQ_API_KEY is missing from .env")
+
+groq_client = Groq(api_key=GROQ_API_KEY)
 from plan_config import PLAN_HAS_AUDIO, SCENE_DURATIONS_NO_AUDIO, pick_voice, get_voices_for_language
 AUDIO_DIR = "audio_output"
 
@@ -156,7 +160,7 @@ async def scene_to_narration(scene: dict, language: str = "english") -> str:
         response = await asyncio.wait_for(
             asyncio.to_thread(
                 lambda: groq_client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
+                    model="openai/gpt-oss-20b",
                     messages=[
                         {
                             "role": "system",

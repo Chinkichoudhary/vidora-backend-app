@@ -1,12 +1,16 @@
 import os
-import json
-from groq import Groq
 from dotenv import load_dotenv
+from groq import Groq
+import json
 from validator import validate_and_clean_scenes
-
 load_dotenv()
 
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+if not GROQ_API_KEY:
+    raise RuntimeError("GROQ_API_KEY is missing from .env")
+
+client = Groq(api_key=GROQ_API_KEY)
 
 
 def generate_scene_json(extracted_text: str, target_scene_count: int = None) -> list:
@@ -97,7 +101,7 @@ Convert this into a JSON array of video scenes following the format above.
         max_tokens = min(max(2000, target_scene_count * 230), 8000)
 
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-20b",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},

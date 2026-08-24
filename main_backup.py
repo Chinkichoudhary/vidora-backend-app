@@ -17,11 +17,9 @@ from auth import (
 from pydantic import BaseModel
 import fitz
 import uuid
-import asyncio
 import os
 import json
 import re
-import sys
 import subprocess
 import shutil
 import threading
@@ -49,8 +47,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 os.environ["CHROME_BIN"] = "/usr/bin/chromium"
 os.environ["PUPPETEER_EXECUTABLE_PATH"] = "/usr/bin/chromium"
-if os.name != "nt":
-    os.environ["REMOTION_BROWSER_EXECUTABLE"] = "/usr/bin/chromium"
+os.environ["REMOTION_BROWSER_EXECUTABLE"] = "/usr/bin/chromium"
+
 app = FastAPI()
 
 BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:8000")
@@ -469,854 +467,227 @@ async def start_render(
 
 async def pipeline(extracted_text: str, job_id: str):
     try:
-        # ============================================================
-        # STEP 1: GENERATE SCRIPT / SCENES WITH GROQ
-        # ============================================================
         print(f"[{job_id}] Step: Writing script with AI", flush=True)
-
         render_jobs[job_id]["step"] = "Writing script with AI"
         render_jobs[job_id]["status"] = "processing"
 
         plan = render_jobs[job_id].get("plan", "premium")
         language = render_jobs[job_id].get("language", "english")
         voice = render_jobs[job_id].get("voice")
-        duration_minutes = render_jobs[job_id].get("duration_minutes", 3)
-
+        #duration_minutes = render_jobs[job_id].get("duration_minutes", 3)
+        duration_minutes = 0.1
         has_audio = PLAN_HAS_AUDIO.get(plan, True)
+        target_scene_count = estimate_scene_count(duration_minutes, has_audio)
 
-        target_scene_count = estimate_scene_count(
-            duration_minutes,
-            has_audio
-        )
-
-        print(
-            f"[{job_id}] Duration: {duration_minutes} minutes",
-            flush=True
-        )
-
-        print(
-            f"[{job_id}] Target scenes: {target_scene_count}",
-            flush=True
-        )
-
-        result = generate_scene_json(
-            extracted_text,
-            target_scene_count=target_scene_count
-        )
-
-        if not result or not result.get("valid"):
+        result = generate_scene_json(extracted_text, target_scene_count=target_scene_count)
+        if not result["valid"]:
             render_jobs[job_id]["status"] = "error"
-            render_jobs[job_id]["error"] = (
-                "Could not generate valid scenes."
-            )
+            render_jobs[job_id]["error"] = "Could not generate valid scenes."
             return
-
         scenes = result["scenes"]
+        print(f"[{job_id}] Generated {len(scenes)} scenes (target was {target_scene_count})")
 
-        print(
-            f"[{job_id}] Generated {len(scenes)} scenes",
-            flush=True
-        )
-
-        # ============================================================
-        # STEP 2: GENERATE VOICEOVER
-        # ============================================================
-        print(
-            f"[{job_id}] Step: Generating voiceover",
-            flush=True
-        )
-
+        print(f"[{job_id}] Step: Generating voiceover")
         render_jobs[job_id]["step"] = "Generating voiceover"
-
         video_id = job_id
+        audio_results = await generate_all_audio(scenes, video_id, plan=plan, language=language, voice=voice)
+        print(f"[{job_id}] Audio generated for {len(audio_results)} scenes")
 
-        audio_results = await generate_all_audio(
-            scenes,
-            video_id,
-            plan=plan,
-            language=language,
-            voice=voice
-        )
-
-        print(
-            f"[{job_id}] Audio generated for {len(audio_results)} scenes",
-            flush=True
-        )
-
-        # ============================================================
-        # STEP 3: BUILD FINAL SCENE DATA
-        # ============================================================
         final_scenes = []
         total_frames = 0
-
         for i, scene in enumerate(scenes):
-
-            if i >= len(audio_results):
-                raise Exception(
-                    f"Audio result missing for scene {i + 1}"
-                )
-
             audio_info = audio_results[i]
-
-            duration_frames = audio_info.get(
-                "duration_frames",
-                150
-            )
-
+            duration_frames = audio_info.get("duration_frames", 150)
             total_frames += duration_frames
-
-            audio_filename = audio_info.get(
-                "audio_filename"
-            )
-
             final_scenes.append({
                 **scene,
-
-                "audio_file": audio_filename,
-
-                "audio_url": (
-                    BASE_URL
-                    + "/audio/"
-                    + str(audio_filename)
-                    if audio_filename
-                    else None
-                ),
-
-                "narration": audio_info.get(
-                    "narration",
-                    ""
-                ),
-
-                "duration_seconds": audio_info.get(
-                    "duration_seconds",
-                    4.0
-                ),
-
+                "audio_file": audio_info.get("audio_filename"),
+                "audio_url": BASE_URL + "/audio/" + str(audio_info.get("audio_filename"))
+                             if audio_info.get("audio_filename") else None,
+                "narration": audio_info.get("narration", ""),
+                "duration_seconds": audio_info.get("duration_seconds", 4.0),
                 "duration_frames": duration_frames,
             })
 
-        print(
-            f"[{job_id}] Total frames: {total_frames}",
-            flush=True
-        )
+        print(f"[{job_id}] Total frames: {total_frames}")
 
-        # ============================================================
-        # STEP 4: COPY AUDIO INTO REMOTION PUBLIC FOLDER
-        # ============================================================
-        os.makedirs(
-            REMOTION_PUBLIC_AUDIO,
-            exist_ok=True
-        )
-
-        audio_source_dir = os.path.join(
-            BASE_DIR,
-            "audio_output"
-        )
-
+        os.makedirs(REMOTION_PUBLIC_AUDIO, exist_ok=True)
         for scene in final_scenes:
+            if scene.get("audio_file"):
+                src = os.path.join("audio_output", scene["audio_file"])
+                dst = os.path.join(REMOTION_PUBLIC_AUDIO, scene["audio_file"])
+                if os.path.exists(src):
+                    shutil.copy(src, dst)
 
-            audio_file = scene.get("audio_file")
+        print(f"[{job_id}] Audio copied to Remotion public folder")
 
-            if not audio_file:
-                continue
-
-            src = os.path.join(
-                audio_source_dir,
-                audio_file
-            )
-
-            dst = os.path.join(
-                REMOTION_PUBLIC_AUDIO,
-                audio_file
-            )
-
-            if os.path.exists(src):
-
-                shutil.copy2(
-                    src,
-                    dst
-                )
-
-                print(
-                    f"[{job_id}] Copied audio: {audio_file}",
-                    flush=True
-                )
-
-            else:
-
-                print(
-                    f"[{job_id}] WARNING: Audio not found: {src}",
-                    flush=True
-                )
-
-        print(
-            f"[{job_id}] Audio copied to Remotion public folder",
-            flush=True
-        )
-
-        # ============================================================
-        # STEP 5: UPDATE sampleScenes.ts
-        # ============================================================
         sample_scenes_path = os.path.join(
-            REMOTION_PROJECT_PATH,
-            "src",
-            "sampleScenes.ts"
+            REMOTION_PROJECT_PATH, "src", "sampleScenes.ts"
         )
-
-        scenes_json = json.dumps(
-            final_scenes,
-            indent=2,
-            ensure_ascii=False
-        )
-
-        sample_scenes_content = (
-            "export const sampleScenes = "
-            + scenes_json
-            + ";\n"
-        )
-
-        with open(
-            sample_scenes_path,
-            "w",
-            encoding="utf-8"
-        ) as f:
-
+        scenes_json = json.dumps(final_scenes, indent=2)
+        sample_scenes_content = "export const sampleScenes = " + scenes_json + ";\n"
+        with open(sample_scenes_path, "w", encoding="utf-8") as f:
             f.write(sample_scenes_content)
 
-        print(
-            f"[{job_id}] sampleScenes.ts updated",
-            flush=True
-        )
+        print(f"[{job_id}] sampleScenes.ts updated")
 
-        # ============================================================
-        # STEP 6: PREPARE REMOTION OUTPUT
-        # ============================================================
+        
+
+        print(f"[{job_id}] Root.tsx updated")
+        logger.info(f"[{job_id}] Step: Rendering video")
         render_jobs[job_id]["step"] = "Rendering video"
 
-        print(
-            f"[{job_id}] Step: Rendering video",
-            flush=True
-        )
+        out_dir = os.path.join(REMOTION_PROJECT_PATH, "out")
+        os.makedirs(out_dir, exist_ok=True)
 
-        out_dir = os.path.join(
-            REMOTION_PROJECT_PATH,
-            "out"
-        )
-
-        os.makedirs(
-            out_dir,
-            exist_ok=True
-        )
-
-        output_filename = (
-            f"{video_id}_video.mp4"
-        )
-
-        output_file = os.path.abspath(
-            os.path.join(
-                out_dir,
-                output_filename
-            )
-        )
+        output_filename = f"{video_id}_video.mp4"
+        output_file = os.path.join(out_dir, output_filename)
 
         if os.path.exists(output_file):
-            try:
-                os.remove(output_file)
-            except PermissionError:
-                print(
-                    f"[{job_id}] Existing output file is locked. "
-                    f"Waiting before continuing...",
-                    flush=True
-                )
-                await asyncio.sleep(2)
+            os.remove(output_file)
 
-                if os.path.exists(output_file):
-                    raise Exception(
-                        f"Output file is locked: {output_file}"
-                    )
+        print(f"[{job_id}] Output file: {output_file}")
 
-        print(
-            f"[{job_id}] Output file: {output_file}",
-            flush=True
-        )
+        time.sleep(1)
 
-        # ============================================================
-        # STEP 7: FIND REMOTION EXECUTABLE
-        # ============================================================
-        if os.name == "nt":
-
-            remotion_cmd = os.path.join(
-                REMOTION_PROJECT_PATH,
-                "node_modules",
-                ".bin",
-                "remotion.cmd"
-            )
-
-        else:
-
-            remotion_cmd = os.path.join(
-                REMOTION_PROJECT_PATH,
-                "node_modules",
-                ".bin",
-                "remotion"
-            )
-
-        remotion_cmd = os.path.abspath(
-            remotion_cmd
-        )
-
-        if not os.path.exists(remotion_cmd):
-
-            raise Exception(
-                f"Remotion executable not found: "
-                f"{remotion_cmd}"
-            )
-
-        print(
-            f"[{job_id}] Remotion executable found: "
-            f"{remotion_cmd}",
-            flush=True
-        )
-
-        # ============================================================
-        # STEP 8: BUILD REMOTION COMMAND
-        # ============================================================
-        if os.name == "nt":
-
-            command = [
-                "cmd.exe",
-                "/d",
-                "/s",
-                "/c",
-                remotion_cmd,
-                "render",
-                "src/index.ts",
-                "FullVideo",
-                output_file,
-                "--overwrite",
-                "--log=verbose",
-                "--concurrency=1",
-            ]
-
-        else:
-
-            command = [
-                remotion_cmd,
-                "render",
-                "src/index.ts",
-                "FullVideo",
-                output_file,
-                "--overwrite",
-                "--log=verbose",
-                "--concurrency=1",
-            ]
-
-        # ============================================================
-        # STEP 9: PREPARE ENVIRONMENT
-        # ============================================================
+        command = [
+    "npx",
+    "remotion",
+    "render",
+    "src/index.ts",
+    "FullVideo",
+    output_file,
+    "--overwrite",
+    "--log=verbose",
+    "--concurrency=1",
+]
         env = os.environ.copy()
 
         if os.name != "nt":
-
-            env["CHROME_BIN"] = "/usr/bin/chromium"
-
-            env["PUPPETEER_EXECUTABLE_PATH"] = (
-                "/usr/bin/chromium"
-            )
+            env["CHROME_BIN"]="/usr/bin/chromium"
+            env["PUPPETEER_EXECUTABLE_PATH"]="/usr/bin/chromium"
 
             command += [
-                "--browser-executable=/usr/bin/chromium",
-                "--chromium-flag=--no-sandbox",
-                "--chromium-flag=--disable-setuid-sandbox",
-                "--chromium-flag=--disable-dev-shm-usage",
-                "--chromium-flag=--disable-gpu",
-                "--chromium-flag=--use-gl=swiftshader",
+        "--browser-executable=/usr/bin/chromium",
+        "--chromium-flag=--no-sandbox",
+        "--chromium-flag=--disable-setuid-sandbox",
+        "--chromium-flag=--disable-dev-shm-usage",
+        "--chromium-flag=--disable-gpu",
+        "--chromium-flag=--use-gl=swiftshader",
             ]
-
         else:
+            env.pop("CHROME_BIN", None)
+            env.pop("PUPPETEER_EXECUTABLE_PATH", None)
+            env.pop("REMOTION_BROWSER_EXECUTABLE", None)
 
-            env.pop(
-                "CHROME_BIN",
-                None
-            )
+        print("========== ENVIRONMENT ==========")
+        print("PATH =", env.get("PATH"))
+        print("NODE =", shutil.which("node"))
+        print("NPX =", shutil.which("npx"))
+        print("CHROMIUM =", shutil.which("chromium"))
 
-            env.pop(
-                "PUPPETEER_EXECUTABLE_PATH",
-                None
-            )
-
-            env.pop(
-                "REMOTION_BROWSER_EXECUTABLE",
-                None
-            )
-
-        # ============================================================
-        # STEP 10: DEBUG INFORMATION
-        # ============================================================
-        print(
-            "========== REMOTION DEBUG ==========",
-            flush=True
-        )
-
-        print(
-            "Operating system:",
-            os.name,
-            flush=True
-        )
-
-        print(
-            "Python:",
-            sys.executable,
-            flush=True
-        )
-
-        print(
-            "Node:",
-            shutil.which("node"),
-            flush=True
-        )
-
-        print(
-            "NPM:",
-            shutil.which("npm"),
-            flush=True
-        )
-
-        print(
-            "NPX:",
-            shutil.which("npx"),
-            flush=True
-        )
-
-        print(
-            "Remotion:",
-            remotion_cmd,
-            flush=True
-        )
-
-        print(
-            "Remotion exists:",
-            os.path.exists(remotion_cmd),
-            flush=True
-        )
-
-        print(
-            "Working directory:",
-            REMOTION_PROJECT_PATH,
-            flush=True
-        )
-
-        print(
-            "Output:",
-            output_file,
-            flush=True
-        )
-
-        print(
-            "Command:",
+        print("========== COMMAND ==========")
+        print(" ".join(command))
+        print("Working directory:", REMOTION_PROJECT_PATH)
+        print("ABOUT TO RUN REMOTION", flush=True)
+    
+        result = subprocess.run(
             command,
-            flush=True
+            cwd=REMOTION_PROJECT_PATH,
+            env=env,
+            capture_output=True,
+            text=True,
         )
 
-        print(
-            "====================================",
-            flush=True
-        )
+        print("Listing output directory")
 
-        # ============================================================
-        # STEP 11: RUN REMOTION
-        # ============================================================
-        print(
-            f"[{job_id}] ABOUT TO RUN REMOTION",
-            flush=True
-        )
+        for root, dirs, files in os.walk(REMOTION_PROJECT_PATH):
+            for f in files:
+                if f.endswith(".mp4"):
+                    print("FOUND:", os.path.join(root, f))
+        print("REMOTION FINISHED", flush=True)
+        with open("/tmp/remotion_stdout.txt", "w") as f:
+            f.write(result.stdout) 
 
-        stdout_log = os.path.join(
-            REMOTION_PROJECT_PATH,
-            "remotion_stdout.txt"
-        )
+        with open("/tmp/remotion_stderr.txt", "w") as f:
+            f.write(result.stderr)
 
-        stderr_log = os.path.join(
-            REMOTION_PROJECT_PATH,
-            "remotion_stderr.txt"
-        )
+        print("stdout length =", len(result.stdout))
+        print("stderr length =", len(result.stderr))
 
-        # Open logs so Remotion output is written continuously.
-        with open(
-            stdout_log,
-            "w",
-            encoding="utf-8",
-            errors="replace"
-        ) as stdout_file, open(
-            stderr_log,
-            "w",
-            encoding="utf-8",
-            errors="replace"
-        ) as stderr_file:
+        print("========== RETURN CODE ==========")
+        print(result.returncode)
+        print("OUTPUT EXISTS:", os.path.exists(output_file))
+        print("EXPECTED OUTPUT:", output_file)
+        print("DIRECTORY CONTENTS:", os.listdir(out_dir))
+        if result.returncode != 0:
+            print(result.stdout)
+            print(result.stderr)
+            raise Exception("Remotion render failed")
 
-            process = subprocess.Popen(
-                command,
-                cwd=REMOTION_PROJECT_PATH,
-                env=env,
-                stdout=stdout_file,
-                stderr=stderr_file,
-                stdin=subprocess.DEVNULL,
-                shell=False,
-            )
+        print("========== OUT DIRECTORY ==========")
 
-            print(
-                f"[{job_id}] Remotion PID: "
-                f"{process.pid}",
-                flush=True
-            )
+        for root, dirs, files in os.walk(out_dir):
+            print(root)
+            for f in files:
+                print("FILE:", f)
 
-            # --------------------------------------------------------
-            # Wait for Remotion while periodically checking the output.
-            # --------------------------------------------------------
-            timeout_seconds = 900
-            start_time = time.time()
+        print("Searching for rendered mp4...")
 
-            while True:
+        mp4_files = []
 
-                return_code = process.poll()
+        for root, dirs, files in os.walk(REMOTION_PROJECT_PATH):
+            for f in files:
+                if f.endswith(".mp4"):
+                    full = os.path.join(root, f)
+                    print(full)
+                    mp4_files.append(full)
 
-                if return_code is not None:
-                    break
+        if len(mp4_files) == 0:
 
-                elapsed = time.time() - start_time
+            render_jobs[job_id]["status"] = "error"
+            render_jobs[job_id]["error"] = "No MP4 produced."
+            return
 
-                # Show progress every 10 seconds.
-                if int(elapsed) % 10 == 0:
+        output_file = max(mp4_files, key=os.path.getmtime)
 
-                    if os.path.exists(output_file):
+        print("Using:", output_file)
+        output_path = output_file
+        serve_path = os.path.join("audio_output", output_filename)
+        shutil.copy(output_path, serve_path)
 
-                        try:
-                            file_size = os.path.getsize(
-                                output_file
-                            )
+        print(f"[{job_id}] DONE - Video ready at {serve_path}")
 
-                            print(
-                                f"[{job_id}] Rendering... "
-                                f"{int(elapsed)}s | "
-                                f"Current MP4 size: "
-                                f"{file_size:,} bytes",
-                                flush=True
-                            )
-
-                        except OSError:
-                            pass
-
-                    else:
-
-                        print(
-                            f"[{job_id}] Rendering... "
-                            f"{int(elapsed)}s | "
-                            f"MP4 not created yet",
-                            flush=True
-                        )
-
-                    await asyncio.sleep(1)
-
-                else:
-                    await asyncio.sleep(1)
-
-                if elapsed > timeout_seconds:
-
-                    print(
-                        f"[{job_id}] Remotion exceeded "
-                        f"{timeout_seconds} seconds.",
-                        flush=True
-                    )
-
-                    try:
-                        process.kill()
-                    except Exception:
-                        pass
-
-                    raise Exception(
-                        "Remotion render timed out after "
-                        "15 minutes."
-                    )
-
-        # ============================================================
-        # STEP 12: REMOTION FINISHED
-        # ============================================================
-        print(
-            f"[{job_id}] REMOTION PROCESS FINISHED",
-            flush=True
-        )
-
-        print(
-            f"[{job_id}] REMOTION RETURN CODE: "
-            f"{process.returncode}",
-            flush=True
-        )
-
-        # Read the logs after the process has finished.
-        try:
-
-            with open(
-                stdout_log,
-                "r",
-                encoding="utf-8",
-                errors="replace"
-            ) as f:
-
-                remotion_stdout = f.read()
-
-        except Exception:
-
-            remotion_stdout = ""
-
-        try:
-
-            with open(
-                stderr_log,
-                "r",
-                encoding="utf-8",
-                errors="replace"
-            ) as f:
-
-                remotion_stderr = f.read()
-
-        except Exception:
-
-            remotion_stderr = ""
-
-        print(
-            "========== REMOTION STDOUT ==========",
-            flush=True
-        )
-
-        print(
-            remotion_stdout[-10000:],
-            flush=True
-        )
-
-        print(
-            "========== REMOTION STDERR ==========",
-            flush=True
-        )
-
-        print(
-            remotion_stderr[-10000:],
-            flush=True
-        )
-
-        # ============================================================
-        # STEP 13: CHECK RENDER RESULT
-        # ============================================================
-        output_exists = os.path.exists(
-            output_file
-        )
-
-        output_size = (
-            os.path.getsize(output_file)
-            if output_exists
-            else 0
-        )
-
-        print(
-            f"[{job_id}] OUTPUT EXISTS: "
-            f"{output_exists}",
-            flush=True
-        )
-
-        print(
-            f"[{job_id}] OUTPUT SIZE: "
-            f"{output_size:,} bytes",
-            flush=True
-        )
-
-        print(
-            f"[{job_id}] OUTPUT PATH: "
-            f"{output_file}",
-            flush=True
-        )
-
-        # If Remotion failed AND no valid output exists,
-        # report the actual Remotion error.
-        if process.returncode != 0:
-
-            if output_exists and output_size > 100000:
-
-                print(
-                    f"[{job_id}] Remotion returned "
-                    f"{process.returncode}, but a valid "
-                    f"MP4 exists. Continuing.",
-                    flush=True
-                )
-
-            else:
-
-                error_message = (
-                    "Remotion render failed."
-                )
-
-                if remotion_stderr:
-                    error_message += (
-                        "\n\n"
-                        + remotion_stderr[-5000:]
-                    )
-
-                elif remotion_stdout:
-                    error_message += (
-                        "\n\n"
-                        + remotion_stdout[-5000:]
-                    )
-
-                raise Exception(
-                    error_message
-                )
-
-        if not output_exists:
-
-            raise Exception(
-                "Remotion completed but the MP4 "
-                "file was not created:\n"
-                + output_file
-            )
-
-        if output_size < 100000:
-
-            raise Exception(
-                "Remotion produced an MP4 file, "
-                "but the file is unexpectedly small: "
-                f"{output_size} bytes"
-            )
-
-        # ============================================================
-        # STEP 14: COPY VIDEO TO SERVED DIRECTORY
-        # ============================================================
-        serve_dir = os.path.join(
-            BASE_DIR,
-            "audio_output"
-        )
-
-        os.makedirs(
-            serve_dir,
-            exist_ok=True
-        )
-
-        serve_path = os.path.join(
-            serve_dir,
-            output_filename
-        )
-
-        shutil.copy2(
-            output_file,
-            serve_path
-        )
-
-        print(
-            f"[{job_id}] Video copied to:",
-            serve_path,
-            flush=True
-        )
-
-        # ============================================================
-        # STEP 15: FINALIZE JOB
-        # ============================================================
         render_jobs[job_id]["status"] = "done"
+        render_jobs[job_id]["step"] = "Finalizing your video"
+        render_jobs[job_id]["video_url"] = BASE_URL + "/audio/" + output_filename
+        render_jobs[job_id]["total_duration_seconds"] = round(total_frames / 30, 1)
 
-        render_jobs[job_id]["step"] = (
-            "Finalizing your video"
-        )
-
-        render_jobs[job_id]["video_url"] = (
-            BASE_URL
-            + "/audio/"
-            + output_filename
-        )
-
-        render_jobs[job_id]["total_duration_seconds"] = (
-            round(
-                total_frames / 30,
-                1
-            )
-        )
-
-        print(
-            f"[{job_id}] VIDEO READY: "
-            f"{render_jobs[job_id]['video_url']}",
-            flush=True
-        )
-
-        # ============================================================
-        # STEP 16: SAVE VIDEO TO DATABASE
-        # ============================================================
-        user_id = render_jobs[job_id].get(
-            "user_id"
-        )
-
-        topic = render_jobs[job_id].get(
-            "topic",
-            "Educational Video"
-        )
-
+        user_id = render_jobs[job_id].get("user_id")
+        topic = render_jobs[job_id].get("topic", "Educational Video")
         if user_id:
-
             try:
-
                 db = SessionLocal()
-
                 video_record = Video(
                     user_id=user_id,
                     topic=topic,
-                    video_url=(
-                        BASE_URL
-                        + "/audio/"
-                        + output_filename
-                    ),
-                    duration_seconds=int(
-                        total_frames / 30
-                    ),
-                    scene_count=len(
-                        final_scenes
-                    ),
+                    video_url=BASE_URL + "/audio/" + output_filename,
+                    duration_seconds=int(total_frames / 30),
+                    scene_count=len(final_scenes),
                 )
-
                 db.add(video_record)
-
                 db.commit()
-
                 db.close()
-
-                print(
-                    f"[{job_id}] Video saved to database "
-                    f"for user {user_id}",
-                    flush=True
-                )
-
+                print(f"[{job_id}] Video saved to database for user {user_id}")
             except Exception as db_err:
+                print(f"[{job_id}] Failed to save video to DB: {str(db_err)}")
 
-                print(
-                    f"[{job_id}] Failed to save video "
-                    f"to DB: {db_err}",
-                    flush=True
-                )
-
-    # ================================================================
-    # PIPELINE ERROR HANDLER
-    # ================================================================
     except Exception as e:
-
-        print(
-            f"[{job_id}] PIPELINE EXCEPTION:",
-            str(e),
-            flush=True
-        )
-
+        print(f"[{job_id}] PIPELINE EXCEPTION: {str(e)}")
         render_jobs[job_id]["status"] = "error"
-
-        render_jobs[job_id]["step"] = (
-            render_jobs[job_id].get(
-                "step",
-                "Processing"
-            )
-        )
-
         render_jobs[job_id]["error"] = str(e)
+
+
 @app.post("/auth/google")
 async def google_auth(
     request: dict,
