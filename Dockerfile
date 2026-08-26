@@ -1,12 +1,14 @@
 FROM python:3.11-slim
 
-# Install system dependencies
+# ============================================================
+# SYSTEM DEPENDENCIES
+# ============================================================
 RUN apt-get update && apt-get install -y \
-    chromium \
     nodejs \
     npm \
     xvfb \
     wget \
+    curl \
     ca-certificates \
     fonts-liberation \
     libasound2 \
@@ -34,36 +36,71 @@ RUN apt-get update && apt-get install -y \
     xdg-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Browser environment
+# ============================================================
+# ENVIRONMENT
+# ============================================================
 ENV DISPLAY=:99
-ENV CHROME_BIN=/usr/bin/chromium
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-ENV REMOTION_BROWSER_EXECUTABLE=/usr/bin/chromium
-ENV PLAYWRIGHT_BROWSERS_PATH=0
+ENV NODE_ENV=production
 
 WORKDIR /app
 
-# Python dependencies
+# ============================================================
+# PYTHON DEPENDENCIES
+# ============================================================
 COPY requirements.txt .
+
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Remotion dependencies
+# ============================================================
+# REMOTION PROJECT
+# ============================================================
 COPY remotion-project/package*.json ./remotion-project/
 
 WORKDIR /app/remotion-project
 
 RUN npm install
 
-# Install Playwright package
-RUN npm install playwright
+# Make sure Remotion has its own compatible browser
+RUN npx remotion browser ensure
 
-# Install Playwright Chromium
-RUN npx playwright install chromium
+# Install Playwright package if required by the project
+RUN npm install playwright
 
 WORKDIR /app
 
+# ============================================================
+# COPY BACKEND
+# ============================================================
 COPY . .
 
+# ============================================================
+# CREATE REMOTION BROWSER LINK
+# ============================================================
+RUN BROWSER_PATH=$(find /app/remotion-project/node_modules/.remotion \
+    -type f \
+    -name "chrome-headless-shell" \
+    | head -n 1) \
+    && echo "Remotion browser: $BROWSER_PATH" \
+    && test -n "$BROWSER_PATH" \
+    && chmod +x "$BROWSER_PATH" \
+    && ln -sf "$BROWSER_PATH" /usr/local/bin/remotion-chromium
+
+# ============================================================
+# PORT
+# ============================================================
 EXPOSE 8080
 
-CMD sh -c "Xvfb :99 -screen 0 1920x1080x24 -ac & sleep 3 && uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}"
+# ============================================================
+# START SERVER
+# ============================================================
+CMD sh -c '\
+    Xvfb :99 -screen 0 1920x1080x24 -ac >/tmp/xvfb.log 2>&1 & \
+    sleep 3 && \
+    echo "DISPLAY=$DISPLAY" && \
+    echo "Remotion browser:" && \
+    readlink -f /usr/local/bin/remotion-chromium && \
+    /usr/local/bin/remotion-chromium \
+        --version >/tmp/chromium-version.txt 2>&1 || true && \
+    cat /tmp/chromium-version.txt 2>/dev/null || true && \
+    uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080} \
+'

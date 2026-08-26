@@ -825,7 +825,7 @@ async def pipeline(extracted_text: str, job_id: str):
             )
 
             command += [
-                "--browser-executable=/usr/bin/chromium",
+                "--browser-executable=/usr/local/bin/remotion-chromium",
                 "--chromium-flag=--no-sandbox",
                 "--chromium-flag=--disable-setuid-sandbox",
                 "--chromium-flag=--disable-dev-shm-usage",
