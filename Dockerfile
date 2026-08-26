@@ -66,4 +66,4 @@ COPY . .
 
 EXPOSE 8080
 
-CMD sh -c "Xvfb :99 -screen 0 1920x1080x24 & uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}"
+CMD sh -c "Xvfb :99 -screen 0 1920x1080x24 -ac & sleep 3 && uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}"
