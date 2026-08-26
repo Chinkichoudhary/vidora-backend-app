@@ -817,20 +817,12 @@ async def pipeline(extracted_text: str, job_id: str):
         env = os.environ.copy()
 
         if os.name != "nt":
-
-            env["CHROME_BIN"] = "/usr/bin/chromium"
-
-            env["PUPPETEER_EXECUTABLE_PATH"] = (
-                "/usr/bin/chromium"
-            )
-
             command += [
-                # "--browser-executable=/usr/local/bin/remotion-chromium",
-                "--chromium-flag=--no-sandbox",
-                "--chromium-flag=--disable-setuid-sandbox",
-                "--chromium-flag=--disable-dev-shm-usage",
-                "--chromium-flag=--disable-gpu",
-                "--chromium-flag=--use-gl=swiftshader",
+               "--chromium-flag=--no-sandbox",
+               "--chromium-flag=--disable-setuid-sandbox",
+               "--chromium-flag=--disable-dev-shm-usage",
+               "--chromium-flag=--disable-gpu",
+               "--chromium-flag=--use-gl=swiftshader",
             ]
 
         else:
