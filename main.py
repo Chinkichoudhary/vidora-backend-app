@@ -47,10 +47,10 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
-os.environ["CHROME_BIN"] = "/usr/bin/chromium"
-os.environ["PUPPETEER_EXECUTABLE_PATH"] = "/usr/bin/chromium"
-if os.name != "nt":
-    os.environ["REMOTION_BROWSER_EXECUTABLE"] = "/usr/bin/chromium"
+# os.environ["CHROME_BIN"] = "/usr/bin/chromium"
+# os.environ["PUPPETEER_EXECUTABLE_PATH"] = "/usr/bin/chromium"
+# if os.name != "nt":
+#    os.environ["REMOTION_BROWSER_EXECUTABLE"] = "/usr/bin/chromium"
 app = FastAPI()
 
 BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:8000")
@@ -825,7 +825,7 @@ async def pipeline(extracted_text: str, job_id: str):
             )
 
             command += [
-                "--browser-executable=/usr/local/bin/remotion-chromium",
+                # "--browser-executable=/usr/local/bin/remotion-chromium",
                 "--chromium-flag=--no-sandbox",
                 "--chromium-flag=--disable-setuid-sandbox",
                 "--chromium-flag=--disable-dev-shm-usage",
