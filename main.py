@@ -965,7 +965,7 @@ async def pipeline(extracted_text: str, job_id: str):
             # --------------------------------------------------------
             # Wait for Remotion while periodically checking the output.
             # --------------------------------------------------------
-            timeout_seconds = 900
+            timeout_seconds = 1800
             start_time = time.time()
 
             while True:
