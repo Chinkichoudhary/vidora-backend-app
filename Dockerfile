@@ -42,6 +42,7 @@ RUN apt-get update && apt-get install -y \
 ENV DISPLAY=:99
 ENV NODE_ENV=production
 ENV NODE_OPTIONS=--max-old-space-size=1024
+ENV NODE_OPTIONS="--max-old-space-size=3072"
 
 WORKDIR /app
 
