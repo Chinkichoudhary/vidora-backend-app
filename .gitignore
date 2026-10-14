@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 vidora.db
 audio_output/
+*.db

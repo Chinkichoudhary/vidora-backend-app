@@ -55,16 +55,19 @@ app = FastAPI()
 
 BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:8000")
 
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
         "https://vidora-frontend-eaxq.vercel.app",
+        "https://vidora-frontend-three.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 os.makedirs("audio_output", exist_ok=True)
 app.mount("/audio", StaticFiles(directory="audio_output"), name="audio")
