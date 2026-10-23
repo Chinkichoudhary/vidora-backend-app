@@ -63,6 +63,7 @@ app.add_middleware(
         "https://vidora-frontend-eaxq.vercel.app",
         "https://vidora-frontend-three.vercel.app",
     ],
+    allow_origin_regex=r"https://vidora-frontend.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
