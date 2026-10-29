@@ -36,7 +36,10 @@ import json as json_lib
 from datetime import datetime
 import logging
 import os
-
+import secrets
+import hashlib
+import hmac
+from sqlalchemy import func
 LOG_FILE = "/tmp/pipeline.log"
 
 logging.basicConfig(
@@ -111,7 +114,22 @@ class VerifySubscriptionRequest(BaseModel):
     razorpay_subscription_id: str
     razorpay_signature: str
     plan: str
+class SendOtpRequest(BaseModel):
+    name: str
+    email: str
+    password: str
+    turnstile_token: str
 
+
+class VerifyOtpRequest(BaseModel):
+    name: str
+    email: str
+    password: str
+    otp: str
+
+
+class ResendOtpRequest(BaseModel):
+    email: str
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
@@ -295,18 +313,202 @@ async def generate_with_audio(
     }
 
 
+# ---------------- EMAIL OTP SIGNUP ----------------
+# Pending codes live in memory: they reset if the server restarts,
+# which is fine because they only live for 10 minutes anyway.
+pending_otps: dict = {}
+OTP_TTL_SECONDS = 600
+OTP_MAX_ATTEMPTS = 5
+OTP_RESEND_COOLDOWN = 60
+OTP_MAX_SENDS = 5
+OTP_SALT = os.getenv("SECRET_KEY", "vidora-otp-salt")
+
+
+def _hash_otp(email: str, otp: str) -> str:
+    return hashlib.sha256(f"{email}:{otp}:{OTP_SALT}".encode()).hexdigest()
+
+
+def _purge_expired_otps():
+    now = time.time()
+    for key in [k for k, v in pending_otps.items() if now > v["expires_at"]]:
+        pending_otps.pop(key, None)
+
+
+def _find_user_by_email(db: Session, email: str):
+    return db.query(User).filter(func.lower(User.email) == email).first()
+
+
+def verify_turnstile(token: str) -> bool:
+    secret = os.getenv("TURNSTILE_SECRET_KEY")
+    if not secret:
+        raise HTTPException(status_code=500, detail="Verification is not configured")
+    try:
+        r = http_requests.post(
+            "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+            data={"secret": secret, "response": token},
+            timeout=10,
+        )
+        return r.json().get("success") is True
+    except Exception as e:
+        print("Turnstile error:", e, flush=True)
+        return False
+
+
+def send_otp_email(to_email: str, name: str, otp: str):
+    api_key = os.getenv("BREVO_API_KEY")
+    sender = os.getenv("BREVO_SENDER_EMAIL")
+    if not api_key or not sender:
+        raise Exception("Email service is not configured")
+
+    html = (
+        f"<div style='font-family:sans-serif;max-width:420px'>"
+        f"<h2>Verify your Vidora account</h2>"
+        f"<p>Hi {name}, use this code to finish creating your account:</p>"
+        f"<p style='font-size:32px;font-weight:800;letter-spacing:6px'>{otp}</p>"
+        f"<p>This code expires in 10 minutes. If you didn't request it, ignore this email.</p>"
+        f"</div>"
+    )
+    resp = http_requests.post(
+        "https://api.brevo.com/v3/smtp/email",
+        headers={
+            "api-key": api_key,
+            "accept": "application/json",
+            "content-type": "application/json",
+        },
+        json={
+            "sender": {"name": "Vidora", "email": sender},
+            "to": [{"email": to_email}],
+            "subject": "Your Vidora verification code",
+            "htmlContent": html,
+        },
+        timeout=15,
+    )
+    if resp.status_code not in (200, 201):
+        print("Brevo error:", resp.status_code, resp.text, flush=True)
+        raise Exception("Could not send verification email")
+
+
 @app.post("/auth/signup")
-def signup(request: SignupRequest, db: Session = Depends(get_db)):
-    existing = get_user_by_email(db, request.email)
-    if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
+def signup_disabled():
+    # Signup now requires email verification via /auth/send-otp
+    raise HTTPException(
+        status_code=410,
+        detail="Please sign up using email verification.",
+    )
+
+
+@app.post("/auth/send-otp")
+def send_otp(request: SendOtpRequest, db: Session = Depends(get_db)):
+    _purge_expired_otps()
+
+    name = request.name.strip()
+    email = request.email.strip().lower()
+
+    if not name:
+        raise HTTPException(status_code=400, detail="Please enter your full name")
+    if "@" not in email or "." not in email.split("@")[-1]:
+        raise HTTPException(status_code=400, detail="Please enter a valid email address")
     if len(request.password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
-    user = create_user(db, request.name, request.email, request.password)
+
+    if not verify_turnstile(request.turnstile_token):
+        raise HTTPException(status_code=400, detail="Verification check failed. Please try again.")
+
+    if _find_user_by_email(db, email):
+        raise HTTPException(
+            status_code=400,
+            detail="This email is already registered. Please log in instead.",
+        )
+
+    existing = pending_otps.get(email)
+    now = time.time()
+    if existing and now - existing["sent_at"] < OTP_RESEND_COOLDOWN:
+        wait = int(OTP_RESEND_COOLDOWN - (now - existing["sent_at"]))
+        raise HTTPException(status_code=429, detail=f"Please wait {wait}s before requesting another code")
+
+    otp = f"{secrets.randbelow(1000000):06d}"
+    pending_otps[email] = {
+        "hash": _hash_otp(email, otp),
+        "name": name,
+        "sent_at": now,
+        "expires_at": now + OTP_TTL_SECONDS,
+        "attempts": 0,
+        "sends": 1,
+    }
+
+    try:
+        send_otp_email(email, name, otp)
+    except Exception as e:
+        pending_otps.pop(email, None)
+        print("send_otp failed:", e, flush=True)
+        raise HTTPException(status_code=500, detail="Could not send the verification email. Please try again.")
+
+    return {"status": "sent"}
+
+
+@app.post("/auth/resend-otp")
+def resend_otp(request: ResendOtpRequest):
+    email = request.email.strip().lower()
+    entry = pending_otps.get(email)
+    if not entry:
+        raise HTTPException(status_code=400, detail="Please start signup again")
+
+    now = time.time()
+    if now - entry["sent_at"] < OTP_RESEND_COOLDOWN:
+        wait = int(OTP_RESEND_COOLDOWN - (now - entry["sent_at"]))
+        raise HTTPException(status_code=429, detail=f"Please wait {wait}s before requesting another code")
+    if entry["sends"] >= OTP_MAX_SENDS:
+        pending_otps.pop(email, None)
+        raise HTTPException(status_code=429, detail="Too many codes requested. Please start signup again later.")
+
+    otp = f"{secrets.randbelow(1000000):06d}"
+    entry["hash"] = _hash_otp(email, otp)
+    entry["sent_at"] = now
+    entry["expires_at"] = now + OTP_TTL_SECONDS
+    entry["attempts"] = 0
+    entry["sends"] += 1
+
+    try:
+        send_otp_email(email, entry["name"], otp)
+    except Exception as e:
+        print("resend_otp failed:", e, flush=True)
+        raise HTTPException(status_code=500, detail="Could not send the verification email. Please try again.")
+
+    return {"status": "sent"}
+
+
+@app.post("/auth/verify-otp")
+def verify_otp(request: VerifyOtpRequest, db: Session = Depends(get_db)):
+    email = request.email.strip().lower()
+    name = request.name.strip()
+    entry = pending_otps.get(email)
+
+    if not entry:
+        raise HTTPException(status_code=400, detail="Code expired or not requested. Please request a new one.")
+    if time.time() > entry["expires_at"]:
+        pending_otps.pop(email, None)
+        raise HTTPException(status_code=400, detail="Code expired. Please request a new one.")
+    if entry["attempts"] >= OTP_MAX_ATTEMPTS:
+        pending_otps.pop(email, None)
+        raise HTTPException(status_code=429, detail="Too many wrong attempts. Please request a new code.")
+
+    entry["attempts"] += 1
+    if not hmac.compare_digest(entry["hash"], _hash_otp(email, request.otp.strip())):
+        raise HTTPException(status_code=400, detail="Incorrect code. Please check and try again.")
+
+    if len(request.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    if _find_user_by_email(db, email):
+        pending_otps.pop(email, None)
+        raise HTTPException(status_code=400, detail="This email is already registered. Please log in instead.")
+
+    user = create_user(db, name, email, request.password)
+    pending_otps.pop(email, None)
+
     token = create_access_token({"sub": str(user.id)})
     return {
         "token": token,
-        "user": {"id": user.id, "name": user.name, "email": user.email}
+        "user": {"id": user.id, "name": user.name, "email": user.email},
     }
 
 
@@ -1313,50 +1515,6 @@ async def pipeline(extracted_text: str, job_id: str):
         )
 
         render_jobs[job_id]["error"] = str(e)
-@app.post("/auth/google")
-async def google_auth(
-    request: dict,
-    db: Session = Depends(get_db)
-):
-    credential = request.get("credential")
-    if not credential:
-        raise HTTPException(status_code=400, detail="No credential provided")
-
-    google_url = "https://oauth2.googleapis.com/tokeninfo?id_token=" + credential
-    response = http_requests.get(google_url)
-
-    if response.status_code != 200:
-        raise HTTPException(status_code=401, detail="Invalid Google token")
-
-    google_data = response.json()
-
-    client_id = os.getenv("GOOGLE_CLIENT_ID")
-    if google_data.get("aud") != client_id:
-        raise HTTPException(status_code=401, detail="Token not intended for this app")
-
-    google_email = google_data.get("email")
-    google_name = google_data.get("name", google_email)
-
-    if not google_email:
-        raise HTTPException(status_code=400, detail="Could not get email from Google")
-
-    existing_user = get_user_by_email(db, google_email)
-    if existing_user:
-        user = existing_user
-    else:
-        random_password = str(uuid.uuid4())
-        user = create_user(db, google_name, google_email, random_password)
-
-    token = create_access_token({"sub": str(user.id)})
-
-    return {
-        "token": token,
-        "user": {
-            "id": user.id,
-            "name": user.name,
-            "email": user.email,
-        }
-    }
 
 
 @app.get("/job-status/{job_id}")
