@@ -89,3 +89,8 @@ def estimate_scene_count(minutes: float, has_audio: bool) -> int:
     avg_scene_seconds = 40 if has_audio else 7.5
     count = round(target_seconds / avg_scene_seconds)
     return max(3, min(count, 40))
+
+
+    # --- video editor limits ---
+EDIT_RENDER_LIMITS = {"free": 3, "basic": 5, "premium": 10}      # re-renders per video
+EDIT_MAX_SECONDS = {"free": 300, "basic": 600, "premium": 1800}  # max edited video length

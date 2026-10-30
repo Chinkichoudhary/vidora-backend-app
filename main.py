@@ -4,11 +4,12 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from groq_service import generate_scene_json
-from tts_service import generate_all_audio
 from database import create_tables, get_db, Video, SessionLocal, User, PLAN_LIMITS
+from tts_service import generate_all_audio, generate_audio_for_scene
 from plan_config import (
     PLAN_LANGUAGES, PLAN_HAS_AUDIO, PLAN_DURATIONS,
     estimate_scene_count, get_plan_voices_by_language,
+    pick_voice, EDIT_RENDER_LIMITS, EDIT_MAX_SECONDS,
 )
 from auth import (
     create_user, authenticate_user, create_access_token,
@@ -40,6 +41,7 @@ import secrets
 import hashlib
 import hmac
 from sqlalchemy import func
+import wave
 LOG_FILE = "/tmp/pipeline.log"
 
 logging.basicConfig(
@@ -800,7 +802,7 @@ async def pipeline(extracted_text: str, job_id: str):
 
                 "duration_frames": duration_frames,
             })
-
+        render_jobs[job_id]["scenes"] = final_scenes
         print(
             f"[{job_id}] Total frames: {total_frames}",
             flush=True
@@ -1475,9 +1477,8 @@ async def pipeline(extracted_text: str, job_id: str):
                 )
 
                 db.add(video_record)
-
                 db.commit()
-
+                render_jobs[job_id]["video_db_id"] = video_record.id
                 db.close()
 
                 print(
@@ -1521,7 +1522,7 @@ async def pipeline(extracted_text: str, job_id: str):
 def get_job_status(job_id: str):
     if job_id not in render_jobs:
         return {"error": "Job not found"}
-    return render_jobs[job_id]
+    return {k: v for k, v in render_jobs[job_id].items() if k != "scenes"}
 
 
 @app.post("/billing/create-subscription")
@@ -1656,3 +1657,454 @@ def billing_status(current_user=Depends(get_current_user)):
         "durations": PLAN_DURATIONS.get(current_user.plan, [3]),
         "voices_by_language": get_plan_voices_by_language(current_user.plan),
     }
+
+
+
+
+# ======================================================================
+# VIDEO EDITOR: edit right after generation, Save replaces the video
+# ======================================================================
+AUDIO_DIR_ABS = os.path.join(BASE_DIR, "audio_output")
+EDIT_MAX_SCENES = 40
+EDIT_MIN_FRAMES = 90        # 3 seconds
+EDIT_MAX_FRAMES = 3600      # 120 seconds
+EDIT_MAX_CLIP_SECONDS = 115
+EDIT_MAX_REGENERATIONS = 15
+render_lock = threading.Lock()
+
+# field name -> (kind, required)
+EDIT_SCENE_SCHEMA = {
+    "TitleIntro": {"topic": ("str", True)},
+    "DefinitionScene": {"term": ("str", True), "explanation": ("str", True)},
+    "BulletScene": {"heading": ("str", True), "points": ("list", True)},
+    "ComparisonScene": {
+        "heading": ("str", True), "leftTitle": ("str", True), "leftPoints": ("list", True),
+        "rightTitle": ("str", True), "rightPoints": ("list", True),
+    },
+    "DiagramScene": {"heading": ("str", True), "steps": ("list", True)},
+    "TimelineScene": {"heading": ("str", True), "events": ("events", True)},
+    "StatsScene": {
+        "label": ("str", False), "number": ("num", True),
+        "suffix": ("str", False), "description": ("str", True),
+    },
+    "IconGridScene": {"heading": ("str", True), "description": ("str", True), "iconNames": ("list", True)},
+    "QuoteScene": {"quote": ("str", True), "attribution": ("str", False)},
+    "OutroScene": {"summary": ("str", True), "ctaText": ("str", False)},
+}
+EDIT_DEFAULTS = {
+    "label": "Did You Know?",
+    "attribution": "Key Takeaway",
+    "ctaText": "Watch Next Video",
+    "suffix": "",
+}
+
+
+class EditSaveRequest(BaseModel):
+    scenes: list
+
+
+class RegenerateVoiceRequest(BaseModel):
+    scene: dict
+
+
+def _clean_text(value, limit=600):
+    return str(value if value is not None else "").strip()[:limit]
+
+
+def _clean_list(value, limit=8):
+    if not isinstance(value, list):
+        return []
+    items = [_clean_text(x, 300) for x in value]
+    return [x for x in items if x][:limit]
+
+
+def _clean_events(value):
+    out = []
+    if isinstance(value, list):
+        for e in value[:8]:
+            if isinstance(e, dict):
+                year = _clean_text(e.get("year"), 20)
+                label = _clean_text(e.get("label"), 200)
+                if year or label:
+                    out.append({"year": year, "label": label})
+    return out
+
+
+def _clean_number(value):
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if f != f or abs(f) > 1e15:
+        return None
+    return int(f) if f == int(f) else f
+
+
+def _sanitize_scene_content(raw, index):
+    label = f"Slide {index + 1}"
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=400, detail=f"{label} is not valid")
+    stype = raw.get("type")
+    schema = EDIT_SCENE_SCHEMA.get(stype)
+    if schema is None:
+        raise HTTPException(status_code=400, detail=f"{label} has an unknown type")
+
+    scene = {"type": stype}
+    for key, (kind, required) in schema.items():
+        value = raw.get(key)
+        if kind == "str":
+            clean = _clean_text(value) or EDIT_DEFAULTS.get(key, "")
+        elif kind == "list":
+            clean = _clean_list(value)
+        elif kind == "events":
+            clean = _clean_events(value)
+        else:
+            clean = _clean_number(value)
+        if required and (clean is None or clean == "" or clean == []):
+            raise HTTPException(status_code=400, detail=f"{label}: '{key}' cannot be empty")
+        scene[key] = clean
+    return scene
+
+
+def _sanitize_scene(raw, index):
+    label = f"Slide {index + 1}"
+    scene = _sanitize_scene_content(raw, index)
+
+    audio_file = raw.get("audio_file") or None
+    audio_seconds = 0.0
+    if audio_file:
+        audio_file = str(audio_file)
+        if (
+            os.path.basename(audio_file) != audio_file
+            or not os.path.exists(os.path.join(AUDIO_DIR_ABS, audio_file))
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{label}: its voice file is missing. Please record it again.",
+            )
+        try:
+            audio_seconds = float(raw.get("audio_seconds") or 0)
+        except (TypeError, ValueError):
+            audio_seconds = 0.0
+        audio_seconds = max(0.0, min(audio_seconds, 300.0))
+
+    try:
+        frames = int(raw.get("duration_frames") or 0)
+    except (TypeError, ValueError):
+        frames = 0
+    frames = max(EDIT_MIN_FRAMES, min(frames or 180, EDIT_MAX_FRAMES))
+    if audio_file and audio_seconds:
+        frames = min(EDIT_MAX_FRAMES, max(frames, int(audio_seconds * 30) + 30))
+
+    scene.update({
+        "audio_file": audio_file,
+        "audio_seconds": audio_seconds if audio_file else None,
+        "duration_frames": frames,
+        "duration_seconds": round(frames / 30, 1),
+    })
+    return scene
+
+
+def _get_owned_job(job_id: str, current_user):
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Please log in again.")
+    job = render_jobs.get(job_id)
+    if not job:
+        raise HTTPException(
+            status_code=404,
+            detail="This editing session has expired. Please generate the video again.",
+        )
+    if job.get("user_id") != current_user.id:
+        raise HTTPException(status_code=403, detail="This video belongs to another account.")
+    if job.get("status") != "done" or not job.get("scenes"):
+        raise HTTPException(status_code=409, detail="This video isn't ready to edit yet.")
+    return job
+
+
+@app.get("/edit/{job_id}")
+def edit_get(job_id: str, current_user=Depends(get_current_user)):
+    job = _get_owned_job(job_id, current_user)
+    plan = job.get("plan", "free")
+    scenes = []
+    for s in job["scenes"]:
+        s = dict(s)
+        if s.get("audio_file"):
+            s["audio_seconds"] = s.get("audio_seconds") or s.get("duration_seconds")
+        else:
+            s["audio_seconds"] = None
+        scenes.append(s)
+    return {
+        "scenes": scenes,
+        "plan": plan,
+        "has_audio": PLAN_HAS_AUDIO.get(plan, False),
+        "edit_renders_used": job.get("edit_renders_used", 0),
+        "edit_renders_limit": EDIT_RENDER_LIMITS.get(plan, 3),
+        "max_seconds": EDIT_MAX_SECONDS.get(plan, 300),
+    }
+
+
+@app.post("/edit/{job_id}/upload-voice")
+async def edit_upload_voice(
+    job_id: str,
+    file: UploadFile = File(...),
+    current_user=Depends(get_current_user),
+):
+    _get_owned_job(job_id, current_user)
+    data = await file.read()
+    if len(data) > 12 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="That audio file is too large.")
+
+    os.makedirs(AUDIO_DIR_ABS, exist_ok=True)
+    filename = f"{job_id}_voice_{uuid.uuid4().hex[:8]}.wav"
+    path = os.path.join(AUDIO_DIR_ABS, filename)
+    with open(path, "wb") as fh:
+        fh.write(data)
+
+    seconds = 0.0
+    try:
+        with wave.open(path, "rb") as w:
+            seconds = w.getnframes() / float(w.getframerate())
+    except Exception:
+        seconds = 0.0
+
+    if seconds < 0.5 or seconds > EDIT_MAX_CLIP_SECONDS + 1:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise HTTPException(
+            status_code=400,
+            detail=f"Voice clips must be between half a second and {EDIT_MAX_CLIP_SECONDS} seconds.",
+        )
+
+    return {"audio_file": filename, "audio_seconds": round(seconds, 2)}
+
+
+@app.post("/edit/{job_id}/regenerate-voice")
+async def edit_regenerate_voice(
+    job_id: str,
+    request: RegenerateVoiceRequest,
+    current_user=Depends(get_current_user),
+):
+    job = _get_owned_job(job_id, current_user)
+    plan = job.get("plan", "free")
+    if not PLAN_HAS_AUDIO.get(plan, False):
+        raise HTTPException(status_code=403, detail="AI voice is available on the Basic and Premium plans.")
+    if job.get("regen_count", 0) >= EDIT_MAX_REGENERATIONS:
+        raise HTTPException(status_code=429, detail="You've reached the voice regeneration limit for this video.")
+
+    scene = _sanitize_scene_content(request.scene, 0)
+    language = job.get("language") or "english"
+    voice = job.get("voice") or pick_voice(plan, language)
+    job["regen_count"] = job.get("regen_count", 0) + 1
+
+    try:
+        result = await generate_audio_for_scene(
+            scene, 0, f"{job_id}_r{uuid.uuid4().hex[:6]}", voice, language
+        )
+    except Exception as e:
+        print("regenerate-voice failed:", e, flush=True)
+        raise HTTPException(status_code=500, detail="Could not generate the voice. Please try again.")
+
+    if not result.get("audio_filename"):
+        raise HTTPException(status_code=500, detail="Could not generate the voice. Please try again.")
+
+    return {
+        "audio_file": result["audio_filename"],
+        "audio_seconds": round(result["duration_seconds"], 2),
+        "duration_frames": result["duration_frames"],
+        "narration": result["narration"],
+    }
+
+
+def _remotion_command(output_file: str):
+    exe = "remotion.cmd" if os.name == "nt" else "remotion"
+    remotion_cmd = os.path.abspath(
+        os.path.join(REMOTION_PROJECT_PATH, "node_modules", ".bin", exe)
+    )
+    if not os.path.exists(remotion_cmd):
+        raise Exception("Remotion executable not found on the server")
+
+    base = ["render", "src/index.ts", "FullVideo", output_file, "--overwrite", "--concurrency=1"]
+    if os.name == "nt":
+        return ["cmd.exe", "/d", "/s", "/c", remotion_cmd] + base
+    return [remotion_cmd] + base + [
+        "--chromium-flag=--no-sandbox",
+        "--chromium-flag=--disable-setuid-sandbox",
+        "--chromium-flag=--disable-dev-shm-usage",
+        "--chromium-flag=--disable-gpu",
+        "--chromium-flag=--use-gl=swiftshader",
+    ]
+
+
+def rerender_job(new_id: str):
+    job = render_jobs[new_id]
+    scenes = job["scenes"]
+    try:
+        job["status"] = "queued"
+        job["step"] = "Waiting for the render queue"
+
+        with render_lock:
+            job["status"] = "processing"
+            job["step"] = "Rendering video"
+
+            os.makedirs(REMOTION_PUBLIC_AUDIO, exist_ok=True)
+            for s in scenes:
+                f = s.get("audio_file")
+                if f:
+                    shutil.copy2(
+                        os.path.join(AUDIO_DIR_ABS, f),
+                        os.path.join(REMOTION_PUBLIC_AUDIO, f),
+                    )
+
+            sample_path = os.path.join(REMOTION_PROJECT_PATH, "src", "sampleScenes.ts")
+            with open(sample_path, "w", encoding="utf-8") as fh:
+                fh.write(
+                    "export const sampleScenes = "
+                    + json.dumps(scenes, indent=2, ensure_ascii=False)
+                    + ";\n"
+                )
+
+            out_dir = os.path.join(REMOTION_PROJECT_PATH, "out")
+            os.makedirs(out_dir, exist_ok=True)
+            output_filename = f"{new_id}_video.mp4"
+            output_file = os.path.abspath(os.path.join(out_dir, output_filename))
+
+            command = _remotion_command(output_file)
+            env = os.environ.copy()
+            if os.name == "nt":
+                for k in ("CHROME_BIN", "PUPPETEER_EXECUTABLE_PATH", "REMOTION_BROWSER_EXECUTABLE"):
+                    env.pop(k, None)
+
+            stdout_log = os.path.join(REMOTION_PROJECT_PATH, "remotion_edit_stdout.txt")
+            stderr_log = os.path.join(REMOTION_PROJECT_PATH, "remotion_edit_stderr.txt")
+            with open(stdout_log, "w", encoding="utf-8", errors="replace") as so, \
+                 open(stderr_log, "w", encoding="utf-8", errors="replace") as se:
+                process = subprocess.Popen(
+                    command,
+                    cwd=REMOTION_PROJECT_PATH,
+                    env=env,
+                    stdout=so,
+                    stderr=se,
+                    stdin=subprocess.DEVNULL,
+                    shell=False,
+                )
+                try:
+                    process.wait(timeout=1800)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    raise Exception("The render took too long and was stopped. Try fewer or shorter slides.")
+
+            size = os.path.getsize(output_file) if os.path.exists(output_file) else 0
+            if process.returncode != 0 and size < 100000:
+                try:
+                    with open(stderr_log, "r", encoding="utf-8", errors="replace") as fh:
+                        tail = fh.read()[-400:]
+                except Exception:
+                    tail = ""
+                raise Exception("Render failed. " + tail)
+            if size < 100000:
+                raise Exception("The rendered video came out empty. Please try again.")
+
+            os.makedirs(AUDIO_DIR_ABS, exist_ok=True)
+            shutil.copy2(output_file, os.path.join(AUDIO_DIR_ABS, output_filename))
+
+        total_frames = sum(s["duration_frames"] for s in scenes)
+        new_url = BASE_URL + "/audio/" + output_filename
+
+        # Replace the saved video in the user's account
+        video_db_id = job.get("video_db_id")
+        if video_db_id:
+            db = SessionLocal()
+            try:
+                rec = db.query(Video).filter(Video.id == video_db_id).first()
+                if rec:
+                    rec.video_url = new_url
+                    rec.duration_seconds = int(total_frames / 30)
+                    rec.scene_count = len(scenes)
+                    db.commit()
+            finally:
+                db.close()
+
+        job["video_url"] = new_url
+        job["total_duration_seconds"] = round(total_frames / 30, 1)
+        job["step"] = "Finalizing your video"
+        job["status"] = "done"
+
+        # Remove the old video file (best effort)
+        old_url = job.get("previous_video_url")
+        if old_url:
+            old_name = os.path.basename(old_url)
+            if old_name.endswith(".mp4") and old_name != output_filename:
+                try:
+                    os.remove(os.path.join(AUDIO_DIR_ABS, old_name))
+                except OSError:
+                    pass
+
+    except Exception as e:
+        print(f"[{new_id}] EDIT RENDER ERROR:", str(e), flush=True)
+        job["status"] = "error"
+        job["error"] = str(e)
+
+
+@app.post("/edit/{job_id}/save")
+def edit_save(
+    job_id: str,
+    request: EditSaveRequest,
+    current_user=Depends(get_current_user),
+):
+    job = _get_owned_job(job_id, current_user)
+    plan = job.get("plan", "free")
+
+    limit = EDIT_RENDER_LIMITS.get(plan, 3)
+    used = job.get("edit_renders_used", 0)
+    if used >= limit:
+        raise HTTPException(
+            status_code=403,
+            detail=f"You've used all {limit} edit renders for this video.",
+        )
+
+    pending = job.get("edit_job")
+    if pending and render_jobs.get(pending, {}).get("status") in ("starting", "queued", "processing"):
+        raise HTTPException(status_code=409, detail="An edit is already rendering for this video.")
+
+    raw_scenes = request.scenes
+    if not raw_scenes or len(raw_scenes) > EDIT_MAX_SCENES:
+        raise HTTPException(status_code=400, detail=f"A video needs between 1 and {EDIT_MAX_SCENES} slides.")
+
+    scenes = [_sanitize_scene(s, i) for i, s in enumerate(raw_scenes)]
+
+    total_frames = sum(s["duration_frames"] for s in scenes)
+    max_seconds = EDIT_MAX_SECONDS.get(plan, 300)
+    if total_frames > max_seconds * 30:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Your video would be {round(total_frames / 1800, 1)} minutes. "
+                f"The limit on your plan is {max_seconds // 60} minutes. Shorten or delete some slides."
+            ),
+        )
+
+    new_id = str(uuid.uuid4())[:8]
+    render_jobs[new_id] = {
+        "status": "starting",
+        "step": "Waiting for the render queue",
+        "video_url": None,
+        "error": None,
+        "total_duration_seconds": None,
+        "user_id": job["user_id"],
+        "topic": job.get("topic"),
+        "plan": plan,
+        "language": job.get("language"),
+        "voice": job.get("voice"),
+        "duration_minutes": job.get("duration_minutes"),
+        "scenes": scenes,
+        "edit_renders_used": used + 1,
+        "video_db_id": job.get("video_db_id"),
+        "previous_video_url": job.get("video_url"),
+    }
+    job["edit_job"] = new_id
+
+    threading.Thread(target=rerender_job, args=(new_id,), daemon=True).start()
+
+    return {"job_id": new_id, "edit_renders_used": used + 1, "edit_renders_limit": limit}
