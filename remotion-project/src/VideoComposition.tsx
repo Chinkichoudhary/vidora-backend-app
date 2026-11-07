@@ -12,7 +12,7 @@ import { QuoteScene } from "./QuoteScene";
 import { OutroScene } from "./OutroScene";
 import { PresenterBar } from "./PresenterBar";
 import { SceneTransition } from "./SceneTransition";
-
+import { SceneOverlay } from "./SceneOverlay";
 const SCENE_DURATIONS: Record<string, number> = {
   TitleIntro: 150,
   DefinitionScene: 180,
@@ -133,6 +133,8 @@ export const VideoComposition: React.FC<{ scenes: any[] }> = ({
                 {rendered}
               </AbsoluteFill>
 
+              {/* Optional picture / character layer */}
+              <SceneOverlay scene={scene} />
               {/* Audio for this scene */}
               {scene.audio_file && (
   <Audio src={staticFile(`audio/${scene.audio_file}`)} />

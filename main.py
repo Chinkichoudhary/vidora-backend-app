@@ -1661,16 +1661,34 @@ def billing_status(current_user=Depends(get_current_user)):
 
 
 
-# ======================================================================
+## ======================================================================
 # VIDEO EDITOR: edit right after generation, Save replaces the video
 # ======================================================================
+from urllib.parse import urlparse
+
 AUDIO_DIR_ABS = os.path.join(BASE_DIR, "audio_output")
 EDIT_MAX_SCENES = 40
 EDIT_MIN_FRAMES = 90        # 3 seconds
 EDIT_MAX_FRAMES = 3600      # 120 seconds
 EDIT_MAX_CLIP_SECONDS = 115
 EDIT_MAX_REGENERATIONS = 15
+EDIT_CHARACTERS = ("robot", "bulb", "rocket", "owl")
+EDIT_POSITIONS = ("right", "left", "top-right", "bottom-right", "bottom-left")
+EDIT_MAX_IMAGE_BYTES = 8 * 1024 * 1024
+EDIT_MAX_PHOTO_SEARCHES = 100
 render_lock = threading.Lock()
+photo_allowlist: dict = {}   # job_id -> photo URLs returned by search
+
+
+def _detect_image_ext(data: bytes):
+    if data[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    return None
+
 
 # field name -> (kind, required)
 EDIT_SCENE_SCHEMA = {
@@ -1705,6 +1723,10 @@ class EditSaveRequest(BaseModel):
 
 class RegenerateVoiceRequest(BaseModel):
     scene: dict
+
+
+class UsePhotoRequest(BaseModel):
+    url: str
 
 
 def _clean_text(value, limit=600):
@@ -1770,6 +1792,7 @@ def _sanitize_scene(raw, index):
     label = f"Slide {index + 1}"
     scene = _sanitize_scene_content(raw, index)
 
+    # ---- voice ----
     audio_file = raw.get("audio_file") or None
     audio_seconds = 0.0
     if audio_file:
@@ -1788,6 +1811,7 @@ def _sanitize_scene(raw, index):
             audio_seconds = 0.0
         audio_seconds = max(0.0, min(audio_seconds, 300.0))
 
+    # ---- length ----
     try:
         frames = int(raw.get("duration_frames") or 0)
     except (TypeError, ValueError):
@@ -1796,11 +1820,46 @@ def _sanitize_scene(raw, index):
     if audio_file and audio_seconds:
         frames = min(EDIT_MAX_FRAMES, max(frames, int(audio_seconds * 30) + 30))
 
+    # ---- picture ----
+    image_file = raw.get("image_file") or None
+    if image_file:
+        image_file = str(image_file)
+        if (
+            os.path.basename(image_file) != image_file
+            or not image_file.lower().endswith((".jpg", ".png", ".webp"))
+            or not os.path.exists(os.path.join(AUDIO_DIR_ABS, image_file))
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{label}: its picture is missing. Please add it again.",
+            )
+
+    # ---- character ----
+    character = raw.get("character") or None
+    if character not in EDIT_CHARACTERS:
+        character = None
+
+    def _pos(value, default):
+        return value if value in EDIT_POSITIONS else default
+
+    def _size(value, lo, hi, default):
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            n = default
+        return max(lo, min(hi, n))
+
     scene.update({
         "audio_file": audio_file,
         "audio_seconds": audio_seconds if audio_file else None,
         "duration_frames": frames,
         "duration_seconds": round(frames / 30, 1),
+        "image_file": image_file,
+        "image_pos": _pos(raw.get("image_pos"), "top-right"),
+        "image_size": _size(raw.get("image_size"), 15, 60, 26),
+        "character": character,
+        "char_pos": _pos(raw.get("char_pos"), "bottom-right"),
+        "char_size": _size(raw.get("char_size"), 10, 35, 18),
     })
     return scene
 
@@ -1917,6 +1976,116 @@ async def edit_regenerate_voice(
     }
 
 
+# ---------------- pictures: upload + Pixabay stock photos ----------------
+@app.post("/edit/{job_id}/upload-image")
+async def edit_upload_image(
+    job_id: str,
+    file: UploadFile = File(...),
+    current_user=Depends(get_current_user),
+):
+    _get_owned_job(job_id, current_user)
+    data = await file.read()
+    if len(data) > EDIT_MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="That picture is too large (8 MB max).")
+    ext = _detect_image_ext(data)
+    if not ext:
+        raise HTTPException(status_code=400, detail="Please upload a JPG, PNG or WebP picture.")
+
+    os.makedirs(AUDIO_DIR_ABS, exist_ok=True)
+    filename = f"{job_id}_img_{uuid.uuid4().hex[:8]}{ext}"
+    with open(os.path.join(AUDIO_DIR_ABS, filename), "wb") as fh:
+        fh.write(data)
+    return {"image_file": filename}
+
+
+@app.get("/edit/{job_id}/photos")
+def edit_search_photos(job_id: str, q: str, current_user=Depends(get_current_user)):
+    job = _get_owned_job(job_id, current_user)
+    key = os.getenv("PIXABAY_API_KEY")
+    if not key:
+        raise HTTPException(status_code=503, detail="Photo search is not set up yet.")
+    query = q.strip()[:100]
+    if not query:
+        raise HTTPException(status_code=400, detail="Type something to search for.")
+    if job.get("photo_searches", 0) >= EDIT_MAX_PHOTO_SEARCHES:
+        raise HTTPException(status_code=429, detail="You've reached the photo search limit for this video.")
+    job["photo_searches"] = job.get("photo_searches", 0) + 1
+
+    try:
+        r = http_requests.get(
+            "https://pixabay.com/api/",
+            params={
+                "key": key,
+                "q": query,
+                "image_type": "photo",
+                "orientation": "horizontal",
+                "safesearch": "true",
+                "per_page": 12,
+            },
+            timeout=12,
+        )
+    except Exception as e:
+        print("Pixabay error:", e, flush=True)
+        raise HTTPException(status_code=502, detail="Photo search is unavailable right now.")
+    if r.status_code != 200:
+        print("Pixabay status:", r.status_code, r.text[:200], flush=True)
+        raise HTTPException(status_code=502, detail="Photo search is unavailable right now.")
+
+    allowed = photo_allowlist.setdefault(job_id, [])
+    photos = []
+    for p in r.json().get("hits", []):
+        thumb = p.get("webformatURL")
+        full = p.get("largeImageURL")
+        if thumb and full:
+            photos.append({
+                "id": p.get("id"),
+                "thumb": thumb,
+                "url": full,
+                "photographer": p.get("user", ""),
+                "page": p.get("pageURL", ""),
+            })
+            allowed.append(full)
+    # keep the allow-list small
+    if len(allowed) > 300:
+        del allowed[: len(allowed) - 300]
+    return {"photos": photos}
+
+
+@app.post("/edit/{job_id}/use-photo")
+def edit_use_photo(
+    job_id: str,
+    request: UsePhotoRequest,
+    current_user=Depends(get_current_user),
+):
+    _get_owned_job(job_id, current_user)
+
+    # Only URLs that our own search returned can be downloaded.
+    if not request.url.startswith("https://") or request.url not in photo_allowlist.get(job_id, []):
+        raise HTTPException(status_code=400, detail="That photo isn't available. Please search again.")
+
+    try:
+        r = http_requests.get(request.url, timeout=20)
+    except Exception as e:
+        print("photo download error:", e, flush=True)
+        raise HTTPException(status_code=502, detail="Could not download that photo.")
+
+    host = urlparse(r.url).hostname or ""
+    if not (host == "pixabay.com" or host.endswith(".pixabay.com")):
+        raise HTTPException(status_code=502, detail="Could not download that photo.")
+    if r.status_code != 200 or len(r.content) > EDIT_MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=502, detail="Could not download that photo.")
+    ext = _detect_image_ext(r.content)
+    if not ext:
+        raise HTTPException(status_code=502, detail="That file isn't a usable picture.")
+
+    os.makedirs(AUDIO_DIR_ABS, exist_ok=True)
+    filename = f"{job_id}_img_{uuid.uuid4().hex[:8]}{ext}"
+    with open(os.path.join(AUDIO_DIR_ABS, filename), "wb") as fh:
+        fh.write(r.content)
+    return {"image_file": filename}
+
+
+# ---------------- render + save ----------------
 def _remotion_command(output_file: str):
     exe = "remotion.cmd" if os.name == "nt" else "remotion"
     remotion_cmd = os.path.abspath(
@@ -1948,6 +2117,7 @@ def rerender_job(new_id: str):
             job["status"] = "processing"
             job["step"] = "Rendering video"
 
+            # voice files -> remotion/public/audio
             os.makedirs(REMOTION_PUBLIC_AUDIO, exist_ok=True)
             for s in scenes:
                 f = s.get("audio_file")
@@ -1955,6 +2125,17 @@ def rerender_job(new_id: str):
                     shutil.copy2(
                         os.path.join(AUDIO_DIR_ABS, f),
                         os.path.join(REMOTION_PUBLIC_AUDIO, f),
+                    )
+
+            # pictures -> remotion/public/media
+            media_dir = os.path.join(REMOTION_PROJECT_PATH, "public", "media")
+            os.makedirs(media_dir, exist_ok=True)
+            for s in scenes:
+                f = s.get("image_file")
+                if f:
+                    shutil.copy2(
+                        os.path.join(AUDIO_DIR_ABS, f),
+                        os.path.join(media_dir, f),
                     )
 
             sample_path = os.path.join(REMOTION_PROJECT_PATH, "src", "sampleScenes.ts")
