@@ -120,7 +120,7 @@ class SendOtpRequest(BaseModel):
     name: str
     email: str
     password: str
-    turnstile_token: str
+    turnstile_token: str =""
 
 
 class VerifyOtpRequest(BaseModel):
@@ -398,9 +398,35 @@ def signup_disabled():
         detail="Please sign up using email verification.",
     )
 
+ip_send_log: dict = {}
+IP_SEND_LIMIT = 8
+IP_SEND_WINDOW = 3600  # seconds
+
+
+def _client_ip(http_request: Request) -> str:
+    fwd = http_request.headers.get("x-forwarded-for", "")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return http_request.client.host if http_request.client else "unknown"
+
+
+def _check_ip_limit(ip: str):
+    now = time.time()
+    if len(ip_send_log) > 5000:
+        ip_send_log.clear()
+    recent = [t for t in ip_send_log.get(ip, []) if now - t < IP_SEND_WINDOW]
+    if len(recent) >= IP_SEND_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many signup attempts. Please try again in an hour.",
+        )
+    recent.append(now)
+    ip_send_log[ip] = recent
+
+
 
 @app.post("/auth/send-otp")
-def send_otp(request: SendOtpRequest, db: Session = Depends(get_db)):
+def send_otp(request: SendOtpRequest, http_request: Request, db: Session = Depends(get_db)):
     _purge_expired_otps()
 
     name = request.name.strip()
@@ -413,8 +439,7 @@ def send_otp(request: SendOtpRequest, db: Session = Depends(get_db)):
     if len(request.password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
 
-    if not verify_turnstile(request.turnstile_token):
-        raise HTTPException(status_code=400, detail="Verification check failed. Please try again.")
+    _check_ip_limit(_client_ip(http_request))
 
     if _find_user_by_email(db, email):
         raise HTTPException(
